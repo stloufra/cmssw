@@ -392,6 +392,11 @@ namespace calo {
       // constants
       constexpr auto NPULSES = VectorType::RowsAtCompileTime;
 
+
+      //printf("Rows count is %d\n", NPULSES); is 10
+
+
+
       // to keep track of where to terminate if converged
       Eigen::Index w_max_idx_prev = 0;
       float w_max_prev = 0;

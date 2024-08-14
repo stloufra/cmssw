@@ -10,6 +10,7 @@
 #include "DataFormats/Math/interface/approx_exp.h"
 #include "DataFormats/Math/interface/approx_log.h"
 #include "FWCore/Utilities/interface/CMSUnrollLoop.h"
+#include <cooperative_groups.h>
 
 #include "AmplitudeComputationCommonKernels.h"
 #include "AmplitudeComputationKernels.h"
@@ -18,12 +19,14 @@
 namespace ecal {
   namespace multifit {
 
+#define __SIZE_OF_TILE_MULTIFIT__ 4
+
     template <typename MatrixType>
-    __device__ __forceinline__ bool update_covariance(EcalPulseCovariance const& pulse_covariance,
-                                                      MatrixType& inverse_cov,
-                                                      SampleVector const& amplitudes) {
-      constexpr int nsamples = SampleVector::RowsAtCompileTime;
-      constexpr int npulses = BXVectorType::RowsAtCompileTime;
+    __device__ __forceinline__ bool update_covariance(EcalPulseCovariance const& pulse_covariance, //pulse cov
+                                                      MatrixType& inverse_cov, // covMatrix/matrixLforfnnls
+                                                      SampleVector const& amplitudes) { //result amplitudes
+      constexpr int nsamples = SampleVector::RowsAtCompileTime; //10
+      constexpr int npulses = BXVectorType::RowsAtCompileTime; //12 !!!
 
       CMS_UNROLL_LOOP
       for (unsigned int ipulse = 0; ipulse < npulses; ipulse++) {
@@ -40,7 +43,7 @@ namespace ecal {
 
         for (int col = first_sample_t; col < nsamples; col++) {
           for (int row = col; row < nsamples; row++) {
-            inverse_cov(row, col) += value_sq * __ldg(&pulse_covariance.covval[row + offset][col + offset]);
+            inverse_cov(row, col) += value_sq * __ldg(&pulse_covariance.covval[row + offset][col + offset]);  //TODO: attomic add try __ldg
           }
         }
       }
@@ -84,177 +87,197 @@ namespace ecal {
 
       using DataType = SampleVector::Scalar;
 
-      extern __shared__ char shrmem[];
-      DataType* shrMatrixLForFnnlsStorage =
-          reinterpret_cast<DataType*>(shrmem) + calo::multifit::MapSymM<DataType, NPULSES>::total * threadIdx.x;
-      DataType* shrAtAStorage = reinterpret_cast<DataType*>(shrmem) +
-                                calo::multifit::MapSymM<DataType, NPULSES>::total * (threadIdx.x + blockDim.x);
+        //cooperative group magic
+        namespace cg = cooperative_groups;
+        cg::thread_block block = cg::this_thread_block();
+        cg::thread_block_tile<__SIZE_OF_TILE_MULTIFIT__> tile = cg::tiled_partition<__SIZE_OF_TILE_MULTIFIT__>(block);
+
+        auto thrdIdx= tile.thread_rank();
+
+        auto tileIdx = tile.meta_group_rank();
+        auto numGroups = tile.meta_group_size();
+
+        //block.group_index().x * tile.meta_group_size() + tile.meta_group_rank();
+
+      //
+
+        extern __shared__ char shrmem[];
+      DataType* shrMatrixLForFnnlsStorage = reinterpret_cast<DataType*>(shrmem) + calo::multifit::MapSymM<DataType, NPULSES>::total * tileIdx;
+      DataType* shrAtAStorage = reinterpret_cast<DataType*>(shrmem) + calo::multifit::MapSymM<DataType, NPULSES>::total * (tileIdx + numGroups);
 
       // channel
-      int idx = threadIdx.x + blockDim.x * blockIdx.x;
+      //int idx = threadIdx.x + blockDim.x * blockIdx.x;
+
+      int idx = tileIdx + numGroups * block.group_index().x;
+
 
 // ref the right ptr
 #define ARRANGE(var) auto* var = idx >= offsetForInputs ? var##EE : var##EB
-      ARRANGE(amplitudes);
-      ARRANGE(chi2s);
-      ARRANGE(energies);
+          ARRANGE(amplitudes);
+          ARRANGE(chi2s);
+          ARRANGE(energies);
 #undef ARRANGE
 
       if (idx < nchannels) {
-        if (static_cast<MinimizationState>(acState[idx]) == MinimizationState::Precomputed)
-          return;
+          if (static_cast<MinimizationState>(acState[idx]) == MinimizationState::Precomputed)
+              return;
 
-        // get the hash
-        int const inputCh = idx >= offsetForInputs ? idx - offsetForInputs : idx;
-        auto const* dids = idx >= offsetForInputs ? dids_ee : dids_eb;
-        auto const did = DetId{dids[inputCh]};
-        auto const isBarrel = did.subdetId() == EcalBarrel;
-        auto const hashedId = isBarrel ? ecal::reconstruction::hashedIndexEB(did.rawId())
-                                       : offsetForHashes + ecal::reconstruction::hashedIndexEE(did.rawId());
+          // get the hash
+          int const inputCh = idx >= offsetForInputs ? idx - offsetForInputs : idx;
+          auto const *dids = idx >= offsetForInputs ? dids_ee : dids_eb;
+          auto const did = DetId{dids[inputCh]};
+          auto const isBarrel = did.subdetId() == EcalBarrel;
+          auto const hashedId = isBarrel ? ecal::reconstruction::hashedIndexEB(did.rawId())
+                                         : offsetForHashes + ecal::reconstruction::hashedIndexEE(did.rawId());
 
-        // inits
-        int iter = 0;
-        int npassive = 0;
+          // inits
+          int iter = 0;
+          int npassive = 0;
 
-        calo::multifit::ColumnVector<NPULSES, int> pulseOffsets;
-        CMS_UNROLL_LOOP
-        for (int i = 0; i < NPULSES; ++i)
-          pulseOffsets(i) = i;
+          calo::multifit::ColumnVector<NPULSES, int> pulseOffsets;
+          calo::multifit::ColumnVector <NPULSES, DataType> resultAmplitudes;
 
-        calo::multifit::ColumnVector<NPULSES, DataType> resultAmplitudes;
-        CMS_UNROLL_LOOP
-        for (int counter = 0; counter < NPULSES; counter++)
-          resultAmplitudes(counter) = 0;
-
-        // inits
-        //SampleDecompLLT covariance_decomposition;
-        //SampleMatrix inverse_cov;
-        //        SampleVector::Scalar chi2 = 0, chi2_now = 0;
-        float chi2 = 0, chi2_now = 0;
-
-        // loop until ocnverge
-        while (true) {
-          if (iter >= max_iterations)
-            break;
-
-          //inverse_cov = noisecov[idx];
-          //DataType covMatrixStorage[MapSymM<DataType, NSAMPLES>::total];
-          DataType* covMatrixStorage = shrMatrixLForFnnlsStorage;
-          calo::multifit::MapSymM<DataType, NSAMPLES> covMatrix{covMatrixStorage};
-          int counter = 0;
           CMS_UNROLL_LOOP
-          for (int col = 0; col < NSAMPLES; col++) {
-            CMS_UNROLL_LOOP
-            for (int row = col; row < NSAMPLES; row++)
-              covMatrixStorage[counter++] = __ldg(&noisecov[idx].coeffRef(row, col));
-          }
-          update_covariance(pulse_covariance[hashedId], covMatrix, resultAmplitudes);
-
-          // compute actual covariance decomposition
-          //covariance_decomposition.compute(inverse_cov);
-          //auto const& matrixL = covariance_decomposition.matrixL();
-          DataType matrixLStorage[calo::multifit::MapSymM<DataType, NSAMPLES>::total];
-          calo::multifit::MapSymM<DataType, NSAMPLES> matrixL{matrixLStorage};
-          calo::multifit::compute_decomposition_unrolled(matrixL, covMatrix);
-
-          // L * A = P
-          calo::multifit::ColMajorMatrix<NSAMPLES, NPULSES> A;
-          calo::multifit::solve_forward_subst_matrix(A, pulse_matrix[idx], matrixL);
-
-          // L b = s
-          float reg_b[NSAMPLES];
-          calo::multifit::solve_forward_subst_vector(reg_b, samples[idx], matrixL);
-
-          // FIXME: shared mem
-          //DataType AtAStorage[MapSymM<DataType, NPULSES>::total];
-          calo::multifit::MapSymM<DataType, NPULSES> AtA{shrAtAStorage};
-          //SampleMatrix AtA;
-          SampleVector Atb;
-          CMS_UNROLL_LOOP
-          for (int icol = 0; icol < NPULSES; icol++) {
-            float reg_ai[NSAMPLES];
-
-            // load column icol
-            CMS_UNROLL_LOOP
-            for (int counter = 0; counter < NSAMPLES; counter++)
-              reg_ai[counter] = A(counter, icol);
-
-            // compute diagoanl
-            float sum = 0.f;
-            CMS_UNROLL_LOOP
-            for (int counter = 0; counter < NSAMPLES; counter++)
-              sum += reg_ai[counter] * reg_ai[counter];
-
-            // store
-            AtA(icol, icol) = sum;
-
-            // go thru the other columns
-            CMS_UNROLL_LOOP
-            for (int j = icol + 1; j < NPULSES; j++) {
-              // load column j
-              float reg_aj[NSAMPLES];
-              CMS_UNROLL_LOOP
-              for (int counter = 0; counter < NSAMPLES; counter++)
-                reg_aj[counter] = A(counter, j);
-
-              // accum
-              float sum = 0.f;
-              CMS_UNROLL_LOOP
-              for (int counter = 0; counter < NSAMPLES; counter++)
-                sum += reg_aj[counter] * reg_ai[counter];
-
-              // store
-              //AtA(icol, j) = sum;
-              AtA(j, icol) = sum;
-            }
-
-            // Atb accum
-            float sum_atb = 0.f;
-            CMS_UNROLL_LOOP
-            for (int counter = 0; counter < NSAMPLES; counter++)
-              sum_atb += reg_ai[counter] * reg_b[counter];
-
-            // store atb
-            Atb(icol) = sum_atb;
+          for (int i = 0; i < NPULSES; ++i) {
+              pulseOffsets(i) = i;
+              resultAmplitudes(i) = 0;
           }
 
-          // FIXME: shared mem
-          //DataType matrixLForFnnlsStorage[MapSymM<DataType, NPULSES>::total];
-          calo::multifit::MapSymM<DataType, NPULSES> matrixLForFnnls{shrMatrixLForFnnlsStorage};
 
-          calo::multifit::fnnls(AtA,
-                                Atb,
-                                //amplitudes[idx],
-                                resultAmplitudes,
-                                npassive,
-                                pulseOffsets,
-                                matrixLForFnnls,
-                                1e-11,
-                                500,
-                                16,
-                                2);
+          if(thrdIdx ==0) {
 
-          calo::multifit::calculateChiSq(matrixL, pulse_matrix[idx], resultAmplitudes, samples[idx], chi2_now);
+          // inits
+          //SampleDecompLLT covariance_decomposition;
+          //SampleMatrix inverse_cov;
+          //        SampleVector::Scalar chi2 = 0, chi2_now = 0;
+          float chi2 = 0, chi2_now = 0;
 
-          auto deltachi2 = chi2_now - chi2;
-          chi2 = chi2_now;
+          // loop until ocnverge
+          while (true) {
+              if (iter >= max_iterations)
+                  break;
 
-          if (std::abs(deltachi2) < 1e-3)
-            break;
+              //inverse_cov = noisecov[idx];
+              //DataType covMatrixStorage[MapSymM<DataType, NSAMPLES>::total];
+              DataType *covMatrixStorage = shrMatrixLForFnnlsStorage;
+              calo::multifit::MapSymM <DataType, NSAMPLES> covMatrix{covMatrixStorage};
+              int counter = 0;
+              CMS_UNROLL_LOOP
+              for (int col = 0; col < NSAMPLES; col++) {
+                  CMS_UNROLL_LOOP
+                  for (int row = col; row < NSAMPLES; row++)
+                      covMatrixStorage[counter++] = __ldg(&noisecov[idx].coeffRef(row, col));
+              } //how with counter
 
-          //---- AM: TEST
-          //---- it was 3 lines above, now here as in the CPU version
-          ++iter;
-        }
 
-        // store to global output values
-        // FIXME: amplitudes are used in global directly
-        chi2s[inputCh] = chi2;
-        energies[inputCh] = resultAmplitudes(5);
+              update_covariance(pulse_covariance[hashedId], covMatrix, resultAmplitudes);
 
-        CMS_UNROLL_LOOP
-        for (int counter = 0; counter < NPULSES; counter++)
-          amplitudes[inputCh](counter) = resultAmplitudes(counter);
+              // compute actual covariance decomposition
+              //covariance_decomposition.compute(inverse_cov);
+              //auto const& matrixL = covariance_decomposition.matrixL();
+              DataType matrixLStorage[calo::multifit::MapSymM<DataType, NSAMPLES>::total];
+              calo::multifit::MapSymM <DataType, NSAMPLES> matrixL{matrixLStorage};
+              calo::multifit::compute_decomposition_unrolled(matrixL, covMatrix);
+
+              // L * A = P
+              calo::multifit::ColMajorMatrix <NSAMPLES, NPULSES> A;
+              calo::multifit::solve_forward_subst_matrix(A, pulse_matrix[idx], matrixL);
+
+              // L b = s
+              float reg_b[NSAMPLES];
+              calo::multifit::solve_forward_subst_vector(reg_b, samples[idx], matrixL);
+
+              // FIXME: shared mem
+              //DataType AtAStorage[MapSymM<DataType, NPULSES>::total];
+              calo::multifit::MapSymM <DataType, NPULSES> AtA{shrAtAStorage};
+              //SampleMatrix AtA;
+              SampleVector Atb;
+              CMS_UNROLL_LOOP
+              for (int icol = 0; icol < NPULSES; icol++) {
+                  float reg_ai[NSAMPLES];
+
+                  // load column icol
+                  CMS_UNROLL_LOOP
+                  for (int counter = 0; counter < NSAMPLES; counter++)
+                      reg_ai[counter] = A(counter, icol);
+
+                  // compute diagoanl
+                  float sum = 0.f;
+                  CMS_UNROLL_LOOP
+                  for (int counter = 0; counter < NSAMPLES; counter++)
+                      sum += reg_ai[counter] * reg_ai[counter];
+
+                  // store
+                  AtA(icol, icol) = sum;
+
+                  // go thru the other columns
+                  CMS_UNROLL_LOOP
+                  for (int j = icol + 1; j < NPULSES; j++) {
+                      // load column j
+                      float reg_aj[NSAMPLES];
+                      CMS_UNROLL_LOOP
+                      for (int counter = 0; counter < NSAMPLES; counter++)
+                          reg_aj[counter] = A(counter, j);
+
+                      // accum
+                      float sum = 0.f;
+                      CMS_UNROLL_LOOP
+                      for (int counter = 0; counter < NSAMPLES; counter++)
+                          sum += reg_aj[counter] * reg_ai[counter];
+
+                      // store
+                      //AtA(icol, j) = sum;
+                      AtA(j, icol) = sum;
+                  }
+
+                  // Atb accum
+                  float sum_atb = 0.f;
+                  CMS_UNROLL_LOOP
+                  for (int counter = 0; counter < NSAMPLES; counter++)
+                      sum_atb += reg_ai[counter] * reg_b[counter];
+
+                  // store atb
+                  Atb(icol) = sum_atb;
+              }
+
+              // FIXME: shared mem
+              //DataType matrixLForFnnlsStorage[MapSymM<DataType, NPULSES>::total];
+              calo::multifit::MapSymM <DataType, NPULSES> matrixLForFnnls{shrMatrixLForFnnlsStorage};
+
+              calo::multifit::fnnls(AtA,
+                                    Atb,
+                      //amplitudes[idx],
+                                    resultAmplitudes,
+                                    npassive,
+                                    pulseOffsets,
+                                    matrixLForFnnls,
+                                    1e-11,
+                                    500,
+                                    16,
+                                    2);
+
+              calo::multifit::calculateChiSq(matrixL, pulse_matrix[idx], resultAmplitudes, samples[idx], chi2_now);
+
+              auto deltachi2 = chi2_now - chi2;
+              chi2 = chi2_now;
+
+              if (std::abs(deltachi2) < 1e-3)
+                  break;
+
+              //---- AM: TEST
+              //---- it was 3 lines above, now here as in the CPU version
+              ++iter;
+          }
+
+          // store to global output values
+          // FIXME: amplitudes are used in global directly
+          chi2s[inputCh] = chi2;
+          energies[inputCh] = resultAmplitudes(5);
+
+          CMS_UNROLL_LOOP
+          for (int counter = 0; counter < NPULSES; counter++)
+              amplitudes[inputCh](counter) = resultAmplitudes(counter);
+      }
       }
     }
 
@@ -270,13 +293,17 @@ namespace ecal {
         unsigned int totalChannels = eventInputGPU.ebDigis.size + eventInputGPU.eeDigis.size;
         //    unsigned int threads_min = conf.threads.x;
         // TODO: configure from python
-        unsigned int threads_min = configParameters.kernelMinimizeThreads[0];
-        unsigned int blocks_min = threads_min > totalChannels ? 1 : (totalChannels + threads_min - 1) / threads_min;
+        unsigned int threads_min = configParameters.kernelMinimizeThreads[0]; //should be 32
+
+        //static_assert(threads_min == 32);
+
+        unsigned int blocks_min = threads_min > totalChannels ? __SIZE_OF_TILE_MULTIFIT__ : (totalChannels + threads_min - 1) / threads_min * __SIZE_OF_TILE_MULTIFIT__;
         uint32_t const offsetForHashes = conditions.offsetForHashes;
         uint32_t const offsetForInputs = eventInputGPU.ebDigis.size;
-        auto const nbytesShared = 2 * threads_min *
+        auto const nbytesShared = (2 * threads_min *
                                   calo::multifit::MapSymM<DataType, SampleVector::RowsAtCompileTime>::total *
-                                  sizeof(DataType);
+                                  sizeof(DataType) / __SIZE_OF_TILE_MULTIFIT__) + 1;
+
         kernel_minimize<<<blocks_min, threads_min, nbytesShared, cudaStream>>>(
             eventInputGPU.ebDigis.ids.get(),
             eventInputGPU.eeDigis.ids.get(),
@@ -300,6 +327,6 @@ namespace ecal {
       }
 
     }  // namespace v1
-
+#undef __SIZE_OF_TILE_MULTIFIT__
   }  // namespace multifit
 }  // namespace ecal

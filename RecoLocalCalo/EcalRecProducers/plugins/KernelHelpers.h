@@ -1,7 +1,14 @@
 #ifndef RecoLocalCalo_EcalRecProducers_plugins_KernelHelpers_h
 #define RecoLocalCalo_EcalRecProducers_plugins_KernelHelpers_h
 
+
 #include "DataFormats/CaloRecHit/interface/MultifitComputations.h"
+
+/*#ifdef __CUDA_ARCH__
+    #include "DataFormats/CaloRecHit/interface/MultifitComputationsGPU.h"
+#else
+    #include "DataFormats/CaloRecHit/interface/MultifitComputations.h"
+#endif*/
 
 #include <cmath>
 #include <limits>
