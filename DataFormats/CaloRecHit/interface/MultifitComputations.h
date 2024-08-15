@@ -124,11 +124,11 @@ namespace calo {
 
     template <typename MatrixType1, typename MatrixType2, typename VectorType>
     EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC void compute_decomposition_forwardsubst_with_offsets(
-        MatrixType1& L,
-        MatrixType2 const& M,
-        float b[MatrixType1::stride],
-        VectorType const& Atb,
-        int const N,
+        MatrixType1& L, //matrixL
+        MatrixType2 const& M, //AtA
+        float b[MatrixType1::stride], //reg_b
+        VectorType const& Atb, //Atb
+        int const N, //npassive
         ColumnVector<MatrixType1::stride, int> const& pulseOffsets) {
       auto const real_0 = pulseOffsets(0);
       auto const sqrtm_0_0 = std::sqrt(M(real_0, real_0));

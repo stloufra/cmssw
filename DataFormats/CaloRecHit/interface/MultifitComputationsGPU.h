@@ -11,6 +11,8 @@
 
 #include "FWCore/Utilities/interface/CMSUnrollLoop.h"
 
+
+
 namespace calo {
     namespace multifit {
 
@@ -127,13 +129,13 @@ namespace calo {
             }
         }
 
-        template <typename MatrixType1, typename MatrixType2, typename VectorType, unsigned int TileSize>
+        template <typename MatrixType1, typename MatrixType2, typename VectorType>//, unsigned int TileSize>
         EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC void compute_decomposition_forwardsubst_with_offsets(
                 MatrixType1& L, //matrixL
                 MatrixType2 const& M, //AtA
                 float b[MatrixType1::stride], //reg_b
                 VectorType const& Atb, //Atb
-                int const N, npasssive
+                int const N, //npasssive
                 ColumnVector<MatrixType1::stride, int> const& pulseOffsets
                 ) { //cg::thread_block_tile<TileSize>& tile
 
@@ -388,22 +390,22 @@ namespace calo {
         }
 
         // TODO: add active bxs
-        template <typename MatrixType, typename VectorType, unsigned int TileSize>
+        template <typename MatrixType, typename VectorType, typename DataType>//, unsigned int TileSize>
         EIGEN_DEVICE_FUNC void fnnls(MatrixType const& AtA,
                                      VectorType const& Atb,
-                                     VectorType& solution, //resultAmplitudes
+                                     Eigen::Map<calo::multifit::ColumnVector<VectorType::RowsAtCompileTime, DataType>> solution, //resultAmplitudes
                                      int& npassive,
-                                     ColumnVector<VectorType::RowsAtCompileTime, int>& pulseOffsets, //pulseOffsets
+                                     Eigen::Map<calo::multifit::ColumnVector<VectorType::RowsAtCompileTime, int>> pulseOffsets, //pulseOffsets
                                      MapSymM<float, VectorType::RowsAtCompileTime>& matrixL, //matrixLForFnnls
                                      double eps,                    // convergence condition
                                      const int maxIterations,       // maximum number of iterations
                                      const int relaxationPeriod,    // every "relaxationPeriod" iterations
-                                     const int relaxationFactor,
-                                     cg::thread_block_tile<TileSize>& tile) {  // multiply "eps" by "relaxationFactor"
+                                     const int relaxationFactor){//,
+                                     //cg::thread_block_tile<TileSize>& tile) {  // multiply "eps" by "relaxationFactor"
             // Get the thread number within the group
-            const auto idx = tile.thread_rank();
+            //const auto idx = tile.thread_rank();
 
-            if (idx == 0) {
+            //if (idx == 0) {
                 // constants //10
                 constexpr auto NPULSES = VectorType::RowsAtCompileTime;
 
@@ -560,7 +562,7 @@ namespace calo {
                     if (iter % relaxationPeriod == 0)
                         eps *= relaxationFactor;
                 }
-            }
+            //}
         }
 
     }  // namespace multifit
