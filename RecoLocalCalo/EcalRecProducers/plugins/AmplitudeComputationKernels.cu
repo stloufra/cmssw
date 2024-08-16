@@ -18,7 +18,7 @@
 
 namespace ecal {
     namespace multifit {
-
+        namespace cg = cooperative_groups;
 #define __SIZE_OF_TILE_MULTIFIT__ 4
 
         template<typename MatrixType>
@@ -52,6 +52,42 @@ namespace ecal {
             return true;
         }
 
+
+        template<typename MatrixType, unsigned int TileSize>
+        __device__ __forceinline__ bool update_covariance_coop(EcalPulseCovariance const &pulse_covariance, //pulse cov
+                                                          MatrixType &inverse_cov, // covMatrix/matrixLforfnnls
+                                                          SampleVector const &amplitudes,
+                                                          cg::thread_block_tile <TileSize> &tile) { //result amplitudes
+            constexpr int nsamples = SampleVector::RowsAtCompileTime; //10
+            constexpr int npulses = BXVectorType::RowsAtCompileTime; //12 !!!
+
+            auto thrdIdx = tile.thread_rank();
+            auto numThrd = tile.num_threads();
+
+            CMS_UNROLL_LOOP
+            for (unsigned int ipulse = thrdIdx; ipulse < npulses; ipulse+=numThrd) {
+                auto const amplitude = amplitudes.coeff(ipulse);
+                if (amplitude == 0)
+                    continue;
+
+                // FIXME: ipulse - 5 -> ipulse - firstOffset
+                int bx = ipulse - 5;
+                int first_sample_t = std::max(0, bx + 3);
+                int offset = -3 - bx;
+
+                auto const value_sq = amplitude * amplitude;
+
+                for (int col = first_sample_t; col < nsamples; col++) {
+                    for (int row = col; row < nsamples; row++) {
+                        //inverse_cov(row, col) += value_sq * __ldg(&pulse_covariance.covval[row + offset][col +offset]);  //TODO: attomic add try __ldg
+                        auto tmp = value_sq * __ldg(&pulse_covariance.covval[row + offset][col + offset]);
+                        atomicAdd(&inverse_cov(row, col), tmp);
+                    }
+                }
+            }
+
+            return true;
+        }
         ///
         /// launch ctx parameters are (nchannels / block, blocks)
         /// TODO: trivial impl for now, there must be a way to improve
@@ -89,7 +125,6 @@ namespace ecal {
             using DataType = SampleVector::Scalar;
 
             //cooperative group magic
-            namespace cg = cooperative_groups;
             cg::thread_block block = cg::this_thread_block();
             cg::thread_block_tile<__SIZE_OF_TILE_MULTIFIT__> tile = cg::tiled_partition<__SIZE_OF_TILE_MULTIFIT__>(
                     block);
@@ -175,25 +210,29 @@ namespace ecal {
 
                 // loop until ocnverge
                 while (true) {
-                        if (iter >= max_iterations)
-                            break;
+                    if (iter >= max_iterations)
+                        break;
 
 
-                        //inverse_cov = noisecov[idx];
-                        //DataType covMatrixStorage[MapSymM<DataType, NSAMPLES>::total];
-                        //DataType *covMatrixStorage = shrMatrixLForFnnlsStorage;
-                        calo::multifit::MapSymM <DataType, NSAMPLES> covMatrix{shrMatrixLForFnnlsStorage};
-                        int counter = 0;
+                    //inverse_cov = noisecov[idx];
+                    //DataType covMatrixStorage[MapSymM<DataType, NSAMPLES>::total];
+                    //DataType *covMatrixStorage = shrMatrixLForFnnlsStorage;
+                    calo::multifit::MapSymM <DataType, NSAMPLES> covMatrix{shrMatrixLForFnnlsStorage};
+                    //int counter = 0;
+                    CMS_UNROLL_LOOP
+                    for (int col = thrdIdx; col < NSAMPLES; col += numThrd) {
                         CMS_UNROLL_LOOP
-                        for (int col = 0; col < NSAMPLES; col++) {
-                            CMS_UNROLL_LOOP
-                            for (int row = col; row < NSAMPLES; row++)
-                                shrMatrixLForFnnlsStorage[counter++] = __ldg(&noisecov[idx].coeffRef(row, col));
-                        } //how with counter
+                        for (int row = col; row < NSAMPLES; row++)
 
+                            covMatrix(row, col) = __ldg(&noisecov[idx].coeffRef(row, col));
+                    }
+
+                    //tile.sync();
                     if (thrdIdx == 0) {
-                        update_covariance(pulse_covariance[hashedId], covMatrix, resultAmplitudes);
 
+                    update_covariance(pulse_covariance[hashedId], covMatrix, resultAmplitudes);//, tile);
+
+                    //tile.sync();
                         // compute actual covariance decomposition
                         //covariance_decomposition.compute(inverse_cov);
                         //auto const& matrixL = covariance_decomposition.matrixL();
