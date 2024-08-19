@@ -39,14 +39,14 @@ namespace calo {
 
             static constexpr int total = Stride * (Stride + 1) / 2;
             static constexpr int stride = Stride;
-            T* data;
+            T* _data;
 
-            EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC MapSymM(T* data) : data{data} {}
+            EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC MapSymM(T* data) : _data{data} {}
 
             EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC T const& operator()(int const row, int const col) const {
                 auto const tmp = (Stride - col) * (Stride - col + 1) / 2;
                 auto const index = total - tmp + row - col;
-                return data[index];
+                return _data[index];
             }
 
             template <typename U = T>
@@ -54,7 +54,7 @@ namespace calo {
             operator()(int const row, int const col) {
                 auto const tmp = (Stride - col) * (Stride - col + 1) / 2;
                 auto const index = total - tmp + row - col;
-                return data[index];
+                return _data[index];
             }
         };
 

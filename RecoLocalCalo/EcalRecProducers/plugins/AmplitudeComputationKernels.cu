@@ -18,7 +18,7 @@
 
 namespace ecal {
     namespace multifit {
-        namespace cg = cooperative_groups;
+
 #define __SIZE_OF_TILE_MULTIFIT__ 4
 
         template<typename MatrixType>
@@ -52,42 +52,6 @@ namespace ecal {
             return true;
         }
 
-
-        template<typename MatrixType, unsigned int TileSize>
-        __device__ __forceinline__ bool update_covariance_coop(EcalPulseCovariance const &pulse_covariance, //pulse cov
-                                                          MatrixType &inverse_cov, // covMatrix/matrixLforfnnls
-                                                          SampleVector const &amplitudes,
-                                                          cg::thread_block_tile <TileSize> &tile) { //result amplitudes
-            constexpr int nsamples = SampleVector::RowsAtCompileTime; //10
-            constexpr int npulses = BXVectorType::RowsAtCompileTime; //12 !!!
-
-            auto thrdIdx = tile.thread_rank();
-            auto numThrd = tile.num_threads();
-
-            CMS_UNROLL_LOOP
-            for (unsigned int ipulse = thrdIdx; ipulse < npulses; ipulse+=numThrd) {
-                auto const amplitude = amplitudes.coeff(ipulse);
-                if (amplitude == 0)
-                    continue;
-
-                // FIXME: ipulse - 5 -> ipulse - firstOffset
-                int bx = ipulse - 5;
-                int first_sample_t = std::max(0, bx + 3);
-                int offset = -3 - bx;
-
-                auto const value_sq = amplitude * amplitude;
-
-                for (int col = first_sample_t; col < nsamples; col++) {
-                    for (int row = col; row < nsamples; row++) {
-                        //inverse_cov(row, col) += value_sq * __ldg(&pulse_covariance.covval[row + offset][col +offset]);  //TODO: attomic add try __ldg
-                        auto tmp = value_sq * __ldg(&pulse_covariance.covval[row + offset][col + offset]);
-                        atomicAdd(&inverse_cov(row, col), tmp);
-                    }
-                }
-            }
-
-            return true;
-        }
         ///
         /// launch ctx parameters are (nchannels / block, blocks)
         /// TODO: trivial impl for now, there must be a way to improve
@@ -125,19 +89,21 @@ namespace ecal {
             using DataType = SampleVector::Scalar;
 
             //cooperative group magic
+            namespace cg = cooperative_groups;
             cg::thread_block block = cg::this_thread_block();
             cg::thread_block_tile<__SIZE_OF_TILE_MULTIFIT__> tile = cg::tiled_partition<__SIZE_OF_TILE_MULTIFIT__>(
                     block);
 
-            auto thrdIdx = tile.thread_rank();
-            auto numThrd = tile.num_threads();
-            auto tileIdx = tile.meta_group_rank();
-            auto numTile = tile.meta_group_size();
+            auto const thrdIdx = tile.thread_rank();
+            auto const numThrd = tile.num_threads();
+
+            auto const tileIdx = tile.meta_group_rank();
+            auto const numTile = tile.meta_group_size();
 
             //------------------SHARED MEMORY OPERATIONS --------------------------
-            char *myPlace;
+
             extern __shared__ char shrmem[];
-            myPlace = shrmem;
+            char *myPlace = shrmem;
 
             DataType *shrMatrixLForFnnlsStorage =
                     reinterpret_cast<DataType *>(myPlace) + calo::multifit::MapSymM<DataType, NPULSES>::total * tileIdx;
@@ -153,8 +119,8 @@ namespace ecal {
             DataType *shrresultAmplitudesStorage = reinterpret_cast<DataType *>(myPlace) + NPULSES * tileIdx;
             myPlace += NPULSES * sizeof(DataType) * numTile;
 
-            int *shrIterStorage = reinterpret_cast<int *>(myPlace) + tileIdx;
-            myPlace += sizeof(int) * numTile;
+            //int *shrIterStorage = reinterpret_cast<int *>(myPlace) + tileIdx;
+            //myPlace += sizeof(int) * numTile;
 
             float *shrchi2Storage = reinterpret_cast<float *>(myPlace) + tileIdx;
             myPlace += sizeof(float) * numTile;
@@ -164,6 +130,9 @@ namespace ecal {
 
 
             int idx = tileIdx + numTile * block.group_index().x;
+
+
+            //printf("I am thread - %d and i see idx - %d\n", thrdIdx, idx); //here all of them see the idx
 
 
 // ref the right ptr
@@ -186,8 +155,10 @@ namespace ecal {
                                                : offsetForHashes + ecal::reconstruction::hashedIndexEE(did.rawId());
 
                 // inits
-                int &iter = *shrIterStorage;
-                iter = 0;
+                //int iter = *shrIterStorage;
+
+
+                //iter = 0;
 
                 int npassive = 0;
 
@@ -198,41 +169,42 @@ namespace ecal {
                         shrresultAmplitudesStorage);
 
                 CMS_UNROLL_LOOP
+
                 for (int i = thrdIdx; i < NPULSES; i += numThrd) {
                     pulseOffsets(i) = i;
                     resultAmplitudes(i) = 0;
+                    //printf("I am thread - %d and i see i - %d\n", thrdIdx, i); // see all of them
                 }
 
 
-                float &chi2 = *shrchi2Storage;
-                float &chi2_now = *shrchi2_nowStorage;
+                float chi2 = *shrchi2Storage;
+                float chi2_now = *shrchi2_nowStorage;
 
 
                 // loop until ocnverge
-                while (true) {
-                    if (iter >= max_iterations)
-                        break;
 
+                //while (true) {
 
-                    //inverse_cov = noisecov[idx];
-                    //DataType covMatrixStorage[MapSymM<DataType, NSAMPLES>::total];
-                    //DataType *covMatrixStorage = shrMatrixLForFnnlsStorage;
-                    calo::multifit::MapSymM <DataType, NSAMPLES> covMatrix{shrMatrixLForFnnlsStorage};
-                    //int counter = 0;
+                for (int iter = 0; iter < max_iterations; iter++) {
+
+                    //printf("I am thread - %d and i see iter - %d\n", thrdIdx, iter); //see only iter 0
+
+                    DataType *covMatrixStorage = shrMatrixLForFnnlsStorage;
+                    calo::multifit::MapSymM <DataType, NSAMPLES> covMatrix{covMatrixStorage};
+
                     CMS_UNROLL_LOOP
-                    for (int col = thrdIdx; col < NSAMPLES; col += numThrd) {
+                    for (int col = 0; col < NSAMPLES; col += 1) {
                         CMS_UNROLL_LOOP
-                        for (int row = col; row < NSAMPLES; row++)
-
+                        for (int row = col; row < NSAMPLES; row++) {
                             covMatrix(row, col) = __ldg(&noisecov[idx].coeffRef(row, col));
+                        }
                     }
 
-                    //tile.sync();
+                    tile.sync();
+
                     if (thrdIdx == 0) {
+                        update_covariance(pulse_covariance[hashedId], covMatrix, resultAmplitudes);
 
-                    update_covariance(pulse_covariance[hashedId], covMatrix, resultAmplitudes);//, tile);
-
-                    //tile.sync();
                         // compute actual covariance decomposition
                         //covariance_decomposition.compute(inverse_cov);
                         //auto const& matrixL = covariance_decomposition.matrixL();
@@ -259,14 +231,14 @@ namespace ecal {
 
                             // load column icol
                             CMS_UNROLL_LOOP
-                            for (int counter = 0; counter < NSAMPLES; counter++)
-                                reg_ai[counter] = A(counter, icol);
+                            for (int counter = 0; counter < NSAMPLES; counter++) { reg_ai[counter] = A(counter, icol); }
 
                             // compute diagoanl
                             float sum = 0.f;
                             CMS_UNROLL_LOOP
-                            for (int counter = 0; counter < NSAMPLES; counter++)
+                            for (int counter = 0; counter < NSAMPLES; counter++) {
                                 sum += reg_ai[counter] * reg_ai[counter];
+                            }
 
                             // store
                             AtA(icol, icol) = sum;
@@ -277,14 +249,16 @@ namespace ecal {
                                 // load column j
                                 float reg_aj[NSAMPLES];
                                 CMS_UNROLL_LOOP
-                                for (int counter = 0; counter < NSAMPLES; counter++)
+                                for (int counter = 0; counter < NSAMPLES; counter++) {
                                     reg_aj[counter] = A(counter, j);
+                                }
 
                                 // accum
                                 float sum = 0.f;
                                 CMS_UNROLL_LOOP
-                                for (int counter = 0; counter < NSAMPLES; counter++)
+                                for (int counter = 0; counter < NSAMPLES; counter++) {
                                     sum += reg_aj[counter] * reg_ai[counter];
+                                }
 
                                 // store
                                 //AtA(icol, j) = sum;
@@ -294,8 +268,9 @@ namespace ecal {
                             // Atb accum
                             float sum_atb = 0.f;
                             CMS_UNROLL_LOOP
-                            for (int counter = 0; counter < NSAMPLES; counter++)
+                            for (int counter = 0; counter < NSAMPLES; counter++) {
                                 sum_atb += reg_ai[counter] * reg_b[counter];
+                            }
 
                             // store atb
                             Atb(icol) = sum_atb;
@@ -329,9 +304,7 @@ namespace ecal {
                     }
 
                     chi2 = chi2_now;
-                    if (thrdIdx == 0) {
-                        ++iter;
-                    }
+
                 }
 
                 // store to global output values
