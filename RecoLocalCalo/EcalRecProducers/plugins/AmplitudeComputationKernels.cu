@@ -18,15 +18,54 @@
 
 namespace ecal {
     namespace multifit {
+        namespace cg = cooperative_groups;
 
 #define __SIZE_OF_TILE_MULTIFIT__ 4
 
-        template<typename MatrixType>
-        __device__ __forceinline__ bool update_covariance(EcalPulseCovariance const &pulse_covariance, //pulse cov
+        template<typename MatrixType, unsigned int TileSize>
+        __device__ __forceinline__ void update_covariance_coop(EcalPulseCovariance const &pulse_covariance, //pulse cov
                                                           MatrixType &inverse_cov, // covMatrix/matrixLforfnnls
-                                                          SampleVector const &amplitudes) { //result amplitudes
+                                                          SampleVector const &amplitudes,
+                                                          cg::thread_block_tile <TileSize> &tile) { //result amplitudes
+
+            auto const thrdIdx = tile.thread_rank();
+            auto const numThrd = tile.num_threads();
+
+
             constexpr int nsamples = SampleVector::RowsAtCompileTime; //10
             constexpr int npulses = BXVectorType::RowsAtCompileTime; //12 !!!
+
+            //CMS_UNROLL_LOOP
+            for (unsigned int ipulse = thrdIdx; ipulse < npulses; ipulse+=numThrd) {
+                auto const amplitude = amplitudes.coeff(ipulse);
+                if (amplitude == 0)
+                    continue;
+
+                // FIXME: ipulse - 5 -> ipulse - firstOffset
+                int bx = ipulse - 5;
+                int first_sample_t = std::max(0, bx + 3);
+                int offset = -3 - bx;
+
+                auto const value_sq = amplitude * amplitude;
+
+                for (int col = first_sample_t; col < nsamples; col++) {
+                    for (int row = col; row < nsamples; row++) {
+                        auto tmp = value_sq * __ldg(&pulse_covariance.covval[row + offset][col + offset]);
+                        atomicAdd(&inverse_cov(row, col), tmp);
+                        //printf("I am thread %d \n", thrdIdx); // all threads are here
+                    }
+                }
+            }
+
+            tile.sync();
+        }
+
+        template <typename MatrixType>
+        __device__ __forceinline__ bool update_covariance(EcalPulseCovariance const& pulse_covariance,
+                                                          MatrixType& inverse_cov,
+                                                          SampleVector const& amplitudes) {
+            constexpr int nsamples = SampleVector::RowsAtCompileTime;
+            constexpr int npulses = BXVectorType::RowsAtCompileTime;
 
             CMS_UNROLL_LOOP
             for (unsigned int ipulse = 0; ipulse < npulses; ipulse++) {
@@ -43,8 +82,7 @@ namespace ecal {
 
                 for (int col = first_sample_t; col < nsamples; col++) {
                     for (int row = col; row < nsamples; row++) {
-                        inverse_cov(row, col) += value_sq * __ldg(&pulse_covariance.covval[row + offset][col +
-                                                                                                         offset]);  //TODO: attomic add try __ldg
+                        inverse_cov(row, col) += value_sq * __ldg(&pulse_covariance.covval[row + offset][col + offset]);
                     }
                 }
             }
@@ -89,7 +127,6 @@ namespace ecal {
             using DataType = SampleVector::Scalar;
 
             //cooperative group magic
-            namespace cg = cooperative_groups;
             cg::thread_block block = cg::this_thread_block();
             cg::thread_block_tile<__SIZE_OF_TILE_MULTIFIT__> tile = cg::tiled_partition<__SIZE_OF_TILE_MULTIFIT__>(
                     block);
@@ -109,6 +146,10 @@ namespace ecal {
                     reinterpret_cast<DataType *>(myPlace) + calo::multifit::MapSymM<DataType, NPULSES>::total * tileIdx;
             myPlace += calo::multifit::MapSymM<DataType, NPULSES>::total * sizeof(DataType) * numTile;
 
+            DataType *shrMatrixLStorage =
+                    reinterpret_cast<DataType *>(myPlace) + calo::multifit::MapSymM<DataType, NPULSES>::total * tileIdx;
+            myPlace += calo::multifit::MapSymM<DataType, NPULSES>::total * sizeof(DataType) * numTile;
+
             DataType *shrAtAStorage =
                     reinterpret_cast<DataType *>(myPlace) + calo::multifit::MapSymM<DataType, NPULSES>::total * tileIdx;
             myPlace += calo::multifit::MapSymM<DataType, NPULSES>::total * sizeof(DataType) * numTile;
@@ -119,13 +160,13 @@ namespace ecal {
             DataType *shrresultAmplitudesStorage = reinterpret_cast<DataType *>(myPlace) + NPULSES * tileIdx;
             myPlace += NPULSES * sizeof(DataType) * numTile;
 
-            //int *shrIterStorage = reinterpret_cast<int *>(myPlace) + tileIdx;
-            //myPlace += sizeof(int) * numTile;
-
             float *shrchi2Storage = reinterpret_cast<float *>(myPlace) + tileIdx;
             myPlace += sizeof(float) * numTile;
 
             float *shrchi2_nowStorage = reinterpret_cast<float *>(myPlace) + tileIdx;
+            myPlace += sizeof(float) * numTile;
+
+            float *shrsumsq2Storage = reinterpret_cast<float *>(myPlace) + tileIdx;
             myPlace += sizeof(float) * numTile;
 
 
@@ -154,12 +195,6 @@ namespace ecal {
                 auto const hashedId = isBarrel ? ecal::reconstruction::hashedIndexEB(did.rawId())
                                                : offsetForHashes + ecal::reconstruction::hashedIndexEE(did.rawId());
 
-                // inits
-                //int iter = *shrIterStorage;
-
-
-                //iter = 0;
-
                 int npassive = 0;
 
 
@@ -173,27 +208,23 @@ namespace ecal {
                 for (int i = thrdIdx; i < NPULSES; i += numThrd) {
                     pulseOffsets(i) = i;
                     resultAmplitudes(i) = 0;
-                    //printf("I am thread - %d and i see i - %d\n", thrdIdx, i); // see all of them
                 }
 
 
                 float chi2 = *shrchi2Storage;
                 float chi2_now = *shrchi2_nowStorage;
+                float sumsq2 = *shrsumsq2Storage;
 
-
-                // loop until ocnverge
-
-                //while (true) {
+                DataType *covMatrixStorage = shrMatrixLForFnnlsStorage;
+                calo::multifit::MapSymM <DataType, NSAMPLES> covMatrix{covMatrixStorage};
+                calo::multifit::MapSymM <DataType, NSAMPLES> matrixL{shrMatrixLStorage};
 
                 for (int iter = 0; iter < max_iterations; iter++) {
 
-                    //printf("I am thread - %d and i see iter - %d\n", thrdIdx, iter); //see only iter 0
-
-                    DataType *covMatrixStorage = shrMatrixLForFnnlsStorage;
-                    calo::multifit::MapSymM <DataType, NSAMPLES> covMatrix{covMatrixStorage};
+                    //tile.sync();
 
                     CMS_UNROLL_LOOP
-                    for (int col = 0; col < NSAMPLES; col += 1) {
+                    for (int col = thrdIdx; col < NSAMPLES; col += numThrd) {
                         CMS_UNROLL_LOOP
                         for (int row = col; row < NSAMPLES; row++) {
                             covMatrix(row, col) = __ldg(&noisecov[idx].coeffRef(row, col));
@@ -202,15 +233,21 @@ namespace ecal {
 
                     tile.sync();
 
+                    //update_covariance(pulse_covariance[hashedId], covMatrix, resultAmplitudes, tile);
+
+                    //tile.sync();
+
+                    //calo::multifit::compute_decomposition_unrolled(matrixL, covMatrix, sumsq2, tile);
+                    //calo::multifit::compute_decomposition_unrolled_legacy(matrixL, covMatrix, tile);
+
+
+
                     if (thrdIdx == 0) {
+
                         update_covariance(pulse_covariance[hashedId], covMatrix, resultAmplitudes);
 
-                        // compute actual covariance decomposition
-                        //covariance_decomposition.compute(inverse_cov);
-                        //auto const& matrixL = covariance_decomposition.matrixL();
-                        DataType matrixLStorage[calo::multifit::MapSymM<DataType, NSAMPLES>::total];
-                        calo::multifit::MapSymM <DataType, NSAMPLES> matrixL{matrixLStorage};
-                        calo::multifit::compute_decomposition_unrolled(matrixL, covMatrix);
+                        calo::multifit::compute_decomposition_unrolled_legacy(matrixL, covMatrix);
+
 
                         // L * A = P
                         calo::multifit::ColMajorMatrix <NSAMPLES, NPULSES> A;
@@ -298,6 +335,8 @@ namespace ecal {
                                                        chi2_now);
                     }
 
+                    tile.sync();
+
                     if (std::abs(chi2_now - chi2) < 1e-3) {
                         chi2 = chi2_now;
                         break;
@@ -305,7 +344,10 @@ namespace ecal {
 
                     chi2 = chi2_now;
 
+
                 }
+
+                tile.sync();
 
                 // store to global output values
                 // FIXME: amplitudes are used in global directly //only first thread
@@ -349,15 +391,18 @@ namespace ecal {
 
                 auto const nbytesShared = (threads_min *
                                            (calo::multifit::MapSymM<DataType, SampleVector::RowsAtCompileTime>::total *
+                                            sizeof(DataType) //matrixLforFnnl
+                                            +
+                                            calo::multifit::MapSymM<DataType, SampleVector::RowsAtCompileTime>::total *
                                             sizeof(DataType) //matrixL
                                             +
                                             calo::multifit::MapSymM<DataType, SampleVector::RowsAtCompileTime>::total *
                                             sizeof(DataType) //AtA
                                             + SampleMatrix::ColsAtCompileTime * sizeof(int) //pulseOffset
                                             + SampleMatrix::ColsAtCompileTime * sizeof(DataType)//resultAmplitudes
-                                            + sizeof(int) //iter
                                             + sizeof(float) //chi2
                                             + sizeof(float) //chi2_now
+                                            + sizeof(float) //sumsq2 - decompositon chol.
                                            )
                                            / __SIZE_OF_TILE_MULTIFIT__);
 
