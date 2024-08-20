@@ -137,6 +137,9 @@ namespace ecal {
             auto const tileIdx = tile.meta_group_rank();
             auto const numTile = tile.meta_group_size();
 
+            int idx = tileIdx + numTile * block.group_index().x;
+
+
             //------------------SHARED MEMORY OPERATIONS --------------------------
 
             extern __shared__ char shrmem[];
@@ -169,11 +172,23 @@ namespace ecal {
             float *shrsumsq2Storage = reinterpret_cast<float *>(myPlace) + tileIdx;
             myPlace += sizeof(float) * numTile;
 
+            float *shrAStorage = reinterpret_cast<float *>(myPlace) + NPULSES*NSAMPLES * tileIdx;
+            myPlace += NPULSES*NSAMPLES * sizeof(float) * numTile;
 
-            int idx = tileIdx + numTile * block.group_index().x;
+            //---------------VARIABLES DECLARATION------------------------
+            float& chi2 = *shrchi2Storage;
+            float& chi2_now = *shrchi2_nowStorage;
+            float& sumsq2 = *shrsumsq2Storage;
+
+            Eigen::Map <calo::multifit::ColumnVector<NPULSES, int>> pulseOffsets(shrpulseOffsetsStorage);
+            Eigen::Map <calo::multifit::ColumnVector<NPULSES, DataType>> resultAmplitudes(shrresultAmplitudesStorage);
+            Eigen::Map <calo::multifit::ColMajorMatrix <NSAMPLES, NPULSES>> A(shrAStorage);
 
 
-            //printf("I am thread - %d and i see idx - %d\n", thrdIdx, idx); //here all of them see the idx
+            DataType *covMatrixStorage = shrMatrixLForFnnlsStorage;
+            calo::multifit::MapSymM <DataType, NSAMPLES> covMatrix{covMatrixStorage};
+            calo::multifit::MapSymM <DataType, NSAMPLES> matrixL{shrMatrixLStorage};
+
 
 
 // ref the right ptr
@@ -197,12 +212,6 @@ namespace ecal {
 
                 int npassive = 0;
 
-
-                Eigen::Map <calo::multifit::ColumnVector<NPULSES, int>> pulseOffsets(shrpulseOffsetsStorage);
-
-                Eigen::Map <calo::multifit::ColumnVector<NPULSES, DataType>> resultAmplitudes(
-                        shrresultAmplitudesStorage);
-
                 CMS_UNROLL_LOOP
 
                 for (int i = thrdIdx; i < NPULSES; i += numThrd) {
@@ -210,14 +219,7 @@ namespace ecal {
                     resultAmplitudes(i) = 0;
                 }
 
-
-                float chi2 = *shrchi2Storage;
-                float chi2_now = *shrchi2_nowStorage;
-                float sumsq2 = *shrsumsq2Storage;
-
-                DataType *covMatrixStorage = shrMatrixLForFnnlsStorage;
-                calo::multifit::MapSymM <DataType, NSAMPLES> covMatrix{covMatrixStorage};
-                calo::multifit::MapSymM <DataType, NSAMPLES> matrixL{shrMatrixLStorage};
+                tile.sync();
 
                 for (int iter = 0; iter < max_iterations; iter++) {
 
@@ -233,24 +235,16 @@ namespace ecal {
 
                     tile.sync();
 
-                    //update_covariance(pulse_covariance[hashedId], covMatrix, resultAmplitudes, tile);
+                    update_covariance_coop(pulse_covariance[hashedId], covMatrix, resultAmplitudes, tile);
 
-                    //tile.sync();
 
-                    //calo::multifit::compute_decomposition_unrolled(matrixL, covMatrix, sumsq2, tile);
-                    //calo::multifit::compute_decomposition_unrolled_legacy(matrixL, covMatrix, tile);
-
+                    calo::multifit::compute_decomposition_unrolled_coop(matrixL, covMatrix, sumsq2, tile);
 
 
                     if (thrdIdx == 0) {
 
-                        update_covariance(pulse_covariance[hashedId], covMatrix, resultAmplitudes);
-
-                        calo::multifit::compute_decomposition_unrolled_legacy(matrixL, covMatrix);
-
 
                         // L * A = P
-                        calo::multifit::ColMajorMatrix <NSAMPLES, NPULSES> A;
                         calo::multifit::solve_forward_subst_matrix(A, pulse_matrix[idx], matrixL);
 
                         // L b = s
@@ -403,6 +397,7 @@ namespace ecal {
                                             + sizeof(float) //chi2
                                             + sizeof(float) //chi2_now
                                             + sizeof(float) //sumsq2 - decompositon chol.
+                                            + SampleMatrix::RowsAtCompileTime*SampleMatrix::ColsAtCompileTime*sizeof(float) //A
                                            )
                                            / __SIZE_OF_TILE_MULTIFIT__);
 
