@@ -272,16 +272,22 @@ namespace calo {
             b[i] = (Atb(i_real) - total) / l_i_i;
         }
 
-        template<typename MatrixType1, typename MatrixType2, typename MatrixType3>
+        template<typename MatrixType1, typename MatrixType2, typename MatrixType3, unsigned int TileSize>
         EIGEN_DEVICE_FUNC void solve_forward_subst_matrix(MatrixType1 &A,
                                                           MatrixType2 const &pulseMatrixView,
-                                                          MatrixType3 const &matrixL) {
+                                                          MatrixType3 const &matrixL,
+                                                          cg::thread_block_tile <TileSize> &tile){
             // FIXME: this assumes pulses are on columns and samples on rows
+
+            auto const thrdIdx = tile.thread_rank();
+            auto const numThrd = tile.num_threads();
+
+            // TODO: TRY different approaches
             constexpr auto NPULSES = MatrixType2::ColsAtCompileTime;
             constexpr auto NSAMPLES = MatrixType2::RowsAtCompileTime;
 
             CMS_UNROLL_LOOP
-            for (int icol = 0; icol < NPULSES; icol++) {
+            for (int icol = thrdIdx; icol < NPULSES; icol+=numThrd) {
                 float reg_b[NSAMPLES];
                 float reg_L[NSAMPLES];
 
@@ -323,7 +329,58 @@ namespace calo {
             }
         }
 
-        template<typename MatrixType1, typename MatrixType2>
+        template<typename MatrixType1, typename MatrixType2, unsigned int TileSize>
+        EIGEN_DEVICE_FUNC __device__ void solve_forward_subst_vector_coop(float* reg_b,
+                                                          float* reg_b_tmp,
+                                                          float* reg_L,
+                                                          MatrixType1 inputAmplitudesView,
+                                                          MatrixType2 matrixL,
+                                                          cg::thread_block_tile <TileSize> &tile) {
+            constexpr auto NSAMPLES = MatrixType1::RowsAtCompileTime; //10
+
+            auto const thrdIdx = tile.thread_rank();
+            auto const numThrd = tile.num_threads();
+
+            // preload a column and load column 0 of cholesky
+            CMS_UNROLL_LOOP
+            for (int i = thrdIdx; i < NSAMPLES; i+=numThrd) {
+                reg_b_tmp[i] = inputAmplitudesView(i);
+                reg_L[i] = matrixL(i, 0);
+            }
+
+            tile.sync();
+
+            // compute x0 and store it
+            auto x_prev = reg_b_tmp[0] / reg_L[0];
+            reg_b[0] = x_prev;
+
+            // iterate
+            CMS_UNROLL_LOOP
+            for (int iL = 1; iL < NSAMPLES; iL++) {
+                // update accum
+                CMS_UNROLL_LOOP
+                for (int counter = iL + thrdIdx; counter < NSAMPLES; counter+=numThrd){
+                    auto tmp = -1*x_prev * reg_L[counter];
+#ifdef __CUDA_ARCH__
+                    atomicAdd(&reg_b_tmp[counter],tmp);
+#endif
+                    reg_L[counter] = matrixL(counter, iL);
+                }
+
+                tile.sync();
+
+
+                // compute the next x for M(iL, icol)
+                x_prev = reg_b_tmp[iL] / reg_L[iL];
+
+                // store the result value
+                reg_b[iL] = x_prev;
+
+                tile.sync();
+            }
+        }
+
+        template <typename MatrixType1, typename MatrixType2>
         EIGEN_DEVICE_FUNC void solve_forward_subst_vector(float reg_b[MatrixType1::RowsAtCompileTime],
                                                           MatrixType1 inputAmplitudesView,
                                                           MatrixType2 matrixL) {
@@ -363,6 +420,7 @@ namespace calo {
                 reg_b[iL] = x_prev;
             }
         }
+
 
         template<typename MatrixType1, typename MatrixType2, typename MatrixType3, typename MatrixType4>
         EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC

@@ -24,9 +24,9 @@ namespace ecal {
 
         template<typename MatrixType, unsigned int TileSize>
         __device__ __forceinline__ void update_covariance_coop(EcalPulseCovariance const &pulse_covariance, //pulse cov
-                                                          MatrixType &inverse_cov, // covMatrix/matrixLforfnnls
-                                                          SampleVector const &amplitudes,
-                                                          cg::thread_block_tile <TileSize> &tile) { //result amplitudes
+                                                               MatrixType &inverse_cov, // covMatrix/matrixLforfnnls
+                                                               SampleVector const &amplitudes,
+                                                               cg::thread_block_tile <TileSize> &tile) { //result amplitudes
 
             auto const thrdIdx = tile.thread_rank();
             auto const numThrd = tile.num_threads();
@@ -36,7 +36,7 @@ namespace ecal {
             constexpr int npulses = BXVectorType::RowsAtCompileTime; //12 !!!
 
             //CMS_UNROLL_LOOP
-            for (unsigned int ipulse = thrdIdx; ipulse < npulses; ipulse+=numThrd) {
+            for (unsigned int ipulse = thrdIdx; ipulse < npulses; ipulse += numThrd) {
                 auto const amplitude = amplitudes.coeff(ipulse);
                 if (amplitude == 0)
                     continue;
@@ -60,10 +60,10 @@ namespace ecal {
             tile.sync();
         }
 
-        template <typename MatrixType>
-        __device__ __forceinline__ bool update_covariance(EcalPulseCovariance const& pulse_covariance,
-                                                          MatrixType& inverse_cov,
-                                                          SampleVector const& amplitudes) {
+        template<typename MatrixType>
+        __device__ __forceinline__ bool update_covariance(EcalPulseCovariance const &pulse_covariance,
+                                                          MatrixType &inverse_cov,
+                                                          SampleVector const &amplitudes) {
             constexpr int nsamples = SampleVector::RowsAtCompileTime;
             constexpr int npulses = BXVectorType::RowsAtCompileTime;
 
@@ -172,23 +172,37 @@ namespace ecal {
             float *shrsumsq2Storage = reinterpret_cast<float *>(myPlace) + tileIdx;
             myPlace += sizeof(float) * numTile;
 
-            float *shrAStorage = reinterpret_cast<float *>(myPlace) + NPULSES*NSAMPLES * tileIdx;
-            myPlace += NPULSES*NSAMPLES * sizeof(float) * numTile;
+            float *shrAStorage = reinterpret_cast<float *>(myPlace) + NPULSES * NSAMPLES * tileIdx;
+            myPlace += NPULSES * NSAMPLES * sizeof(float) * numTile;
+
+            float *shrreg_bStorage = reinterpret_cast<float *>(myPlace) + tileIdx * NSAMPLES;
+            myPlace += NSAMPLES * sizeof(float) * numTile;
+
+            float *shrreg_b_tmpStorage = reinterpret_cast<float *>(myPlace) + tileIdx * NSAMPLES;
+            myPlace += NSAMPLES * sizeof(float) * numTile; //foward sub vector
+
+            float *shrreg_LStorage = reinterpret_cast<float *>(myPlace) + tileIdx * NSAMPLES;
+            myPlace += NSAMPLES * sizeof(float) * numTile; //foward sub vector
 
             //---------------VARIABLES DECLARATION------------------------
-            float& chi2 = *shrchi2Storage;
-            float& chi2_now = *shrchi2_nowStorage;
-            float& sumsq2 = *shrsumsq2Storage;
+            float &chi2 = *shrchi2Storage;
+            float &chi2_now = *shrchi2_nowStorage;
+            float &sumsq2 = *shrsumsq2Storage;
+
+            float *reg_b = shrreg_bStorage;
+            float *reg_b_tmp = shrreg_b_tmpStorage;
+            float *reg_L = shrreg_LStorage;
+
 
             Eigen::Map <calo::multifit::ColumnVector<NPULSES, int>> pulseOffsets(shrpulseOffsetsStorage);
             Eigen::Map <calo::multifit::ColumnVector<NPULSES, DataType>> resultAmplitudes(shrresultAmplitudesStorage);
-            Eigen::Map <calo::multifit::ColMajorMatrix <NSAMPLES, NPULSES>> A(shrAStorage);
+            Eigen::Map <calo::multifit::ColMajorMatrix<NSAMPLES, NPULSES>> A(shrAStorage);
 
 
             DataType *covMatrixStorage = shrMatrixLForFnnlsStorage;
             calo::multifit::MapSymM <DataType, NSAMPLES> covMatrix{covMatrixStorage};
             calo::multifit::MapSymM <DataType, NSAMPLES> matrixL{shrMatrixLStorage};
-
+            calo::multifit::MapSymM <DataType, NPULSES> AtA{shrAtAStorage};
 
 
 // ref the right ptr
@@ -240,21 +254,16 @@ namespace ecal {
 
                     calo::multifit::compute_decomposition_unrolled_coop(matrixL, covMatrix, sumsq2, tile);
 
+                    // L * A = P
+                    calo::multifit::solve_forward_subst_matrix(A, pulse_matrix[idx], matrixL, tile);
+
+                    //TODO: felt slower with coop intead of one - check
+                    // L b = s
+                    calo::multifit::solve_forward_subst_vector_coop(reg_b, reg_b_tmp, reg_L, samples[idx], matrixL, tile);
+
 
                     if (thrdIdx == 0) {
-
-
-                        // L * A = P
-                        calo::multifit::solve_forward_subst_matrix(A, pulse_matrix[idx], matrixL);
-
-                        // L b = s
-                        float reg_b[NSAMPLES];
-                        calo::multifit::solve_forward_subst_vector(reg_b, samples[idx], matrixL);
-
-                        // FIXME: shared mem
-                        //DataType AtAStorage[MapSymM<DataType, NPULSES>::total];
-                        calo::multifit::MapSymM <DataType, NPULSES> AtA{shrAtAStorage};
-                        //SampleMatrix AtA;
+                        
                         SampleVector Atb;
                         CMS_UNROLL_LOOP
                         for (int icol = 0; icol < NPULSES; icol++) {
@@ -264,7 +273,7 @@ namespace ecal {
                             CMS_UNROLL_LOOP
                             for (int counter = 0; counter < NSAMPLES; counter++) { reg_ai[counter] = A(counter, icol); }
 
-                            // compute diagoanl
+                            // compute diagonal
                             float sum = 0.f;
                             CMS_UNROLL_LOOP
                             for (int counter = 0; counter < NSAMPLES; counter++) {
@@ -397,7 +406,10 @@ namespace ecal {
                                             + sizeof(float) //chi2
                                             + sizeof(float) //chi2_now
                                             + sizeof(float) //sumsq2 - decompositon chol.
-                                            + SampleMatrix::RowsAtCompileTime*SampleMatrix::ColsAtCompileTime*sizeof(float) //A
+                                            + SampleMatrix::RowsAtCompileTime * SampleMatrix::ColsAtCompileTime * sizeof(float) //A
+                                            + sizeof(float) * SampleMatrix::RowsAtCompileTime //reg_b
+                                            + sizeof(float) * SampleMatrix::RowsAtCompileTime //reg_b_tmp
+                                            + sizeof(float) * SampleMatrix::RowsAtCompileTime //reg_b_L
                                            )
                                            / __SIZE_OF_TILE_MULTIFIT__);
 
