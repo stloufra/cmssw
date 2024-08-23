@@ -517,25 +517,30 @@ namespace calo {
         }
 
         // TODO: add active bxs
-        template<typename MatrixType, typename VectorType, typename DataType>
+        template<typename MatrixType, typename MapType, typename DataType>
         //, unsigned int TileSize>
         EIGEN_DEVICE_FUNC void fnnls(MatrixType const &AtA,
-                                     VectorType const &Atb,
-                                     Eigen::Map <calo::multifit::ColumnVector<VectorType::RowsAtCompileTime, DataType>> solution, //resultAmplitudes
+                                     MapType const &Atb,
+                                     Eigen::Map <calo::multifit::ColumnVector< MapType::RowsAtCompileTime, DataType>> solution, //resultAmplitudes
                                      int &npassive,
-                                     Eigen::Map <calo::multifit::ColumnVector<VectorType::RowsAtCompileTime, int>> pulseOffsets, //pulseOffsets
-                                     MapSymM<float, VectorType::RowsAtCompileTime> &matrixL, //matrixLForFnnls
+                                     Eigen::Map <calo::multifit::ColumnVector< MapType::RowsAtCompileTime, int>> pulseOffsets, //pulseOffsets
+                                     MapSymM<float,  MapType::RowsAtCompileTime> &matrixL, //matrixLForFnnls
                                      double eps,                    // convergence condition
                                      const int maxIterations,       // maximum number of iterations
                                      const int relaxationPeriod,    // every "relaxationPeriod" iterations
-                                     const int relaxationFactor) {//,
+                                     const int relaxationFactor) {
+
+
+            typedef Eigen::Matrix<DataType, 10, 1> VectorType;
+            //using VectorType = MapType::Base;
+            constexpr auto NPULSES = 10; //VectorType::RowsAtCompileTime;
+            //,
             //cg::thread_block_tile<TileSize>& tile) {  // multiply "eps" by "relaxationFactor"
             // Get the thread number within the group
             //const auto idx = tile.thread_rank();
 
             //if (idx == 0) {
             // constants //10
-            constexpr auto NPULSES = VectorType::RowsAtCompileTime;
 
 
             // to keep track of where to terminate if converged

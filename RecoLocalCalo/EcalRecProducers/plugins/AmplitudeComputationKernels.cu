@@ -184,6 +184,9 @@ namespace ecal {
             float *shrreg_LStorage = reinterpret_cast<float *>(myPlace) + tileIdx * NSAMPLES;
             myPlace += NSAMPLES * sizeof(float) * numTile; //foward sub vector
 
+            DataType *shrAtbStorage = reinterpret_cast<DataType *>(myPlace) + NPULSES * tileIdx;
+            myPlace += NPULSES * sizeof(DataType) * numTile;
+
             //---------------VARIABLES DECLARATION------------------------
             float &chi2 = *shrchi2Storage;
             float &chi2_now = *shrchi2_nowStorage;
@@ -197,12 +200,18 @@ namespace ecal {
             Eigen::Map <calo::multifit::ColumnVector<NPULSES, int>> pulseOffsets(shrpulseOffsetsStorage);
             Eigen::Map <calo::multifit::ColumnVector<NPULSES, DataType>> resultAmplitudes(shrresultAmplitudesStorage);
             Eigen::Map <calo::multifit::ColMajorMatrix<NSAMPLES, NPULSES>> A(shrAStorage);
+            Eigen::Map <ecal::multifit::SampleVector> Atb(shrAtbStorage);
 
 
             DataType *covMatrixStorage = shrMatrixLForFnnlsStorage;
             calo::multifit::MapSymM <DataType, NSAMPLES> covMatrix{covMatrixStorage};
+            calo::multifit::MapSymM <DataType, NPULSES> matrixLForFnnls{
+                    shrMatrixLForFnnlsStorage}; //use same memory space to save memory
             calo::multifit::MapSymM <DataType, NSAMPLES> matrixL{shrMatrixLStorage};
             calo::multifit::MapSymM <DataType, NPULSES> AtA{shrAtAStorage};
+
+            //SampleVector Atb;
+
 
 
 // ref the right ptr
@@ -259,69 +268,70 @@ namespace ecal {
 
                     //TODO: felt slower with coop intead of one - check
                     // L b = s
-                    calo::multifit::solve_forward_subst_vector_coop(reg_b, reg_b_tmp, reg_L, samples[idx], matrixL, tile);
+                    calo::multifit::solve_forward_subst_vector_coop(reg_b, reg_b_tmp, reg_L, samples[idx], matrixL,
+                                                                    tile);
 
 
-                    if (thrdIdx == 0) {
-                        
-                        SampleVector Atb;
+                    CMS_UNROLL_LOOP
+                    for (int icol = thrdIdx; icol < NPULSES; icol += numThrd) {
+                    //for (int icol = 0; icol < NPULSES; icol++) {
+
+                        float reg_ai[NSAMPLES];
+
+                        // load column icol
                         CMS_UNROLL_LOOP
-                        for (int icol = 0; icol < NPULSES; icol++) {
-                            float reg_ai[NSAMPLES];
+                        for (int counter = 0; counter < NSAMPLES; counter++) {
+                            reg_ai[counter] = A(counter, icol);
+                        }
 
-                            // load column icol
+                        // compute diagonal
+                        float sum = 0.f;
+                        CMS_UNROLL_LOOP
+                        for (int counter = 0; counter < NSAMPLES; counter++) {
+                            sum += reg_ai[counter] * reg_ai[counter];
+                        }
+
+                        // store
+                        AtA(icol, icol) = sum;
+
+                        // go thru the other columns
+                        CMS_UNROLL_LOOP
+                        for (int j = icol + 1; j < NPULSES; j++) {
+                            // load column j
+                            float reg_aj[NSAMPLES];
                             CMS_UNROLL_LOOP
-                            for (int counter = 0; counter < NSAMPLES; counter++) { reg_ai[counter] = A(counter, icol); }
+                            for (int counter = 0; counter < NSAMPLES; counter++) {
+                                reg_aj[counter] = A(counter, j);
+                            }
 
-                            // compute diagonal
+                            // accum
                             float sum = 0.f;
                             CMS_UNROLL_LOOP
                             for (int counter = 0; counter < NSAMPLES; counter++) {
-                                sum += reg_ai[counter] * reg_ai[counter];
+                                sum += reg_aj[counter] * reg_ai[counter];
                             }
 
                             // store
-                            AtA(icol, icol) = sum;
-
-                            // go thru the other columns
-                            CMS_UNROLL_LOOP
-                            for (int j = icol + 1; j < NPULSES; j++) {
-                                // load column j
-                                float reg_aj[NSAMPLES];
-                                CMS_UNROLL_LOOP
-                                for (int counter = 0; counter < NSAMPLES; counter++) {
-                                    reg_aj[counter] = A(counter, j);
-                                }
-
-                                // accum
-                                float sum = 0.f;
-                                CMS_UNROLL_LOOP
-                                for (int counter = 0; counter < NSAMPLES; counter++) {
-                                    sum += reg_aj[counter] * reg_ai[counter];
-                                }
-
-                                // store
-                                //AtA(icol, j) = sum;
-                                AtA(j, icol) = sum;
-                            }
-
-                            // Atb accum
-                            float sum_atb = 0.f;
-                            CMS_UNROLL_LOOP
-                            for (int counter = 0; counter < NSAMPLES; counter++) {
-                                sum_atb += reg_ai[counter] * reg_b[counter];
-                            }
-
-                            // store atb
-                            Atb(icol) = sum_atb;
+                            //AtA(icol, j) = sum;
+                            AtA(j, icol) = sum;
                         }
 
-                        // FIXME: shared mem
-                        //DataType matrixLForFnnlsStorage[MapSymM<DataType, NPULSES>::total];
-                        calo::multifit::MapSymM <DataType, NPULSES> matrixLForFnnls{shrMatrixLForFnnlsStorage};
 
-                        // HERE you eneded
+                        // Atb accum
+                        float sum_atb = 0.f;
+                        CMS_UNROLL_LOOP
+                        for (int counter = 0; counter < NSAMPLES; counter++) {
+                            sum_atb += reg_ai[counter] * reg_b[counter];
+                        }
 
+                        // store atb
+                        Atb(icol) = sum_atb;
+                    }
+
+                    tile.sync();
+
+
+                    if (thrdIdx == 0) {
                         calo::multifit::fnnls(AtA,
                                               Atb,
                                 //amplitudes[idx],
@@ -406,10 +416,12 @@ namespace ecal {
                                             + sizeof(float) //chi2
                                             + sizeof(float) //chi2_now
                                             + sizeof(float) //sumsq2 - decompositon chol.
-                                            + SampleMatrix::RowsAtCompileTime * SampleMatrix::ColsAtCompileTime * sizeof(float) //A
+                                            + SampleMatrix::RowsAtCompileTime * SampleMatrix::ColsAtCompileTime *
+                                              sizeof(float) //A
                                             + sizeof(float) * SampleMatrix::RowsAtCompileTime //reg_b
                                             + sizeof(float) * SampleMatrix::RowsAtCompileTime //reg_b_tmp
                                             + sizeof(float) * SampleMatrix::RowsAtCompileTime //reg_b_L
+                                            + SampleVector::RowsAtCompileTime * sizeof(DataType) // Atb
                                            )
                                            / __SIZE_OF_TILE_MULTIFIT__);
 
