@@ -187,6 +187,21 @@ namespace ecal {
             DataType *shrAtbStorage = reinterpret_cast<DataType *>(myPlace) + NPULSES * tileIdx;
             myPlace += NPULSES * sizeof(DataType) * numTile;
 
+            Eigen::Index* shrw_max_idxStorage = reinterpret_cast<Eigen::Index *>(myPlace) + tileIdx;
+            myPlace += sizeof(Eigen::Index) * numTile;
+
+            Eigen::Index* shrw_max_idx_prevStorage = reinterpret_cast<Eigen::Index *>(myPlace) + tileIdx;
+            myPlace += sizeof(Eigen::Index) * numTile;
+
+            float *shrw_maxStorage = reinterpret_cast<float *>(myPlace) + tileIdx;
+            myPlace += sizeof(float) * numTile;
+
+            float *shrw_max_prevStorage = reinterpret_cast<float *>(myPlace) + tileIdx;
+            myPlace += sizeof(float) * numTile;
+
+            bool *shrrecomputeStorage = reinterpret_cast<bool *>(myPlace) + tileIdx;
+            myPlace += sizeof(bool) * numTile;
+
             //---------------VARIABLES DECLARATION------------------------
             float &chi2 = *shrchi2Storage;
             float &chi2_now = *shrchi2_nowStorage;
@@ -195,6 +210,14 @@ namespace ecal {
             float *reg_b = shrreg_bStorage;
             float *reg_b_tmp = shrreg_b_tmpStorage;
             float *reg_L = shrreg_LStorage;
+
+            float &w_max = *shrw_maxStorage;
+            float &w_max_prev = *shrw_max_prevStorage;
+
+            Eigen::Index& w_max_idx = *shrw_max_idxStorage;
+            Eigen::Index& w_max_idx_prev = *shrw_max_idx_prevStorage;
+
+            bool &recompute = *shrrecomputeStorage;
 
 
             Eigen::Map <calo::multifit::ColumnVector<NPULSES, int>> pulseOffsets(shrpulseOffsetsStorage);
@@ -331,19 +354,25 @@ namespace ecal {
                     tile.sync();
 
 
-                    if (thrdIdx == 0) {
-                        calo::multifit::fnnls(AtA,
-                                              Atb,
-                                //amplitudes[idx],
-                                              resultAmplitudes,
-                                              npassive,
-                                              pulseOffsets,
-                                              matrixLForFnnls,
-                                              1e-11,
-                                              500,
-                                              16,
-                                              2);
 
+                        calo::multifit::fnnls_coop(AtA,
+                                                  Atb,
+                                                  resultAmplitudes,
+                                                  npassive,
+                                                  pulseOffsets,
+                                                  matrixLForFnnls,
+                                                  1e-11,
+                                                  500,
+                                                  16,
+                                                  2,
+                                                  w_max,
+                                                  w_max_prev,
+                                                  w_max_idx,
+                                                  w_max_idx_prev,
+                                                  recompute,
+                                                  tile);
+
+                    if (thrdIdx == 0) {
                         calo::multifit::calculateChiSq(matrixL, pulse_matrix[idx], resultAmplitudes, samples[idx],
                                                        chi2_now);
                     }
@@ -422,6 +451,11 @@ namespace ecal {
                                             + sizeof(float) * SampleMatrix::RowsAtCompileTime //reg_b_tmp
                                             + sizeof(float) * SampleMatrix::RowsAtCompileTime //reg_b_L
                                             + SampleVector::RowsAtCompileTime * sizeof(DataType) // Atb
+                                            + sizeof(Eigen::Index) //w_max_idx
+                                            + sizeof(Eigen::Index) //w_max_idx_prev
+                                            + sizeof(float) //w_max
+                                            + sizeof(float) //w_max_prev
+                                            + sizeof(bool)  //iter
                                            )
                                            / __SIZE_OF_TILE_MULTIFIT__);
 
