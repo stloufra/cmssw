@@ -370,9 +370,10 @@ namespace ecal {
                                                   w_max_idx,
                                                   w_max_idx_prev,
                                                   recompute,
+                                                  sumsq2,
                                                   tile);
 
-                    if (thrdIdx == 0) {
+                    if (thrdIdx == 0) { //TODO: this is not done
                         calo::multifit::calculateChiSq(matrixL, pulse_matrix[idx], resultAmplitudes, samples[idx],
                                                        chi2_now);
                     }
@@ -455,7 +456,7 @@ namespace ecal {
                                             + sizeof(Eigen::Index) //w_max_idx_prev
                                             + sizeof(float) //w_max
                                             + sizeof(float) //w_max_prev
-                                            + sizeof(bool)  //iter
+                                            + sizeof(bool)  //recompute
                                            )
                                            / __SIZE_OF_TILE_MULTIFIT__);
 
