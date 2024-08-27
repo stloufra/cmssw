@@ -1,5 +1,6 @@
 #include <cmath>
 #include <limits>
+#include <atomic>
 
 #include <cuda.h>
 
@@ -205,11 +206,11 @@ namespace ecal {
             int *shrnpassiveStorage = reinterpret_cast<int *>(myPlace) + tileIdx;
             myPlace +=  sizeof(int) * numTile;
 
-            bool *shrhasNegativeStorage = reinterpret_cast<bool *>(myPlace) + tileIdx;
-            myPlace += sizeof(bool) * numTile;
+            int *shrhasNegativeStorage = reinterpret_cast<int *>(myPlace) + tileIdx;
+            myPlace += sizeof(int) * numTile;
 
-            bool *shrhasNansStorage = reinterpret_cast<bool *>(myPlace) + tileIdx;
-            myPlace += sizeof(bool) * numTile;
+            int *shrhasNansStorage = reinterpret_cast<int *>(myPlace) + tileIdx;
+            myPlace += sizeof(int) * numTile;
 
             float *shrsFnnlsStorage = reinterpret_cast<float *>(myPlace) + tileIdx * NSAMPLES;
             myPlace += NSAMPLES * sizeof(float) * numTile;
@@ -233,8 +234,8 @@ namespace ecal {
             Eigen::Index& w_max_idx_prev = *shrw_max_idx_prevStorage;
 
             bool &recompute = *shrrecomputeStorage;
-            bool &hasNegative = *shrhasNegativeStorage;
-            bool &hasNans = *shrhasNansStorage;
+            int &hasNegative = *shrhasNegativeStorage;
+            int &hasNans = *shrhasNansStorage;
 
             int &npassive = *shrnpassiveStorage;
 
@@ -485,6 +486,8 @@ namespace ecal {
                                             + sizeof(float) //w_max_prev
                                             + sizeof(bool)  //recompute
                                             + sizeof(int)   //npassive
+                                            + sizeof(int) //has negative    -bool doesnt work
+                                            + sizeof(int) //has nans        -bool doesnt work
                                             + sizeof(float) * SampleMatrix::RowsAtCompileTime //s
                                             + sizeof(double) //eps
                                            )

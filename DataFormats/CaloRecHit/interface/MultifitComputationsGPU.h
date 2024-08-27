@@ -707,10 +707,10 @@ namespace calo {
         //, unsigned int TileSize>
         EIGEN_DEVICE_FUNC void fnnls_coop(MatrixType const &AtA,
                                           MapType const &Atb,
-                                          Eigen::Map <calo::multifit::ColumnVector<MapType::RowsAtCompileTime, DataType>>& solution, //resultAmplitudes
+                                          Eigen::Map <calo::multifit::ColumnVector<MapType::RowsAtCompileTime, DataType>> &solution, //resultAmplitudes
                                           int &npassive,
-                                          Eigen::Map <calo::multifit::ColumnVector<MapType::RowsAtCompileTime, int>>& pulseOffsets, //pulseOffsets
-                                          Eigen::Map <calo::multifit::ColumnVector<MapType::RowsAtCompileTime, float>>& s,
+                                          Eigen::Map <calo::multifit::ColumnVector<MapType::RowsAtCompileTime, int>> &pulseOffsets, //pulseOffsets
+                                          Eigen::Map <calo::multifit::ColumnVector<MapType::RowsAtCompileTime, float>> &s,
                                           MapSymM<float, MapType::RowsAtCompileTime> &matrixL, //matrixLForFnnls
                                           double &eps,                    // convergence condition
                                           const int maxIterations,       // maximum number of iterations
@@ -718,12 +718,12 @@ namespace calo {
                                           const int relaxationFactor,
                                           float &w_max,
                                           float &w_max_prev,
-                                          Eigen::Index& w_max_idx,
-                                          Eigen::Index& w_max_idx_prev,
+                                          Eigen::Index &w_max_idx,
+                                          Eigen::Index &w_max_idx_prev,
                                           bool &recompute,
                                           float &sumsq2,
-                                          bool &hasNegative,
-                                          bool &hasNans,
+                                          int &hasNegative,
+                                          int &hasNans,
                                           float *reg_b,
                                           cg::thread_block_tile <TileSize> &tile) {
 
@@ -794,12 +794,14 @@ namespace calo {
                 }
 
 
-                if (thrdIdx == 0) {
-                    // inner loop
-                    for (int HMT = 0; HMT < maxIterations; HMT++) {
-                        if (npassive == 0)
-                            break;
+                // inner loop
+                for (int HMT = 0; HMT < maxIterations; HMT++) {
 
+
+                    if (npassive == 0)
+                        break;
+
+                    if (thrdIdx == 0) {
                         //s.head(npassive)
                         //auto const& matrixL =
                         //    AtA.topLeftCorner(npassive, npassive)
@@ -824,30 +826,44 @@ namespace calo {
 
                             s(i) = (reg_b[i] - total) / matrixL(i, i);
                         }
+                    }
 
-                        // done if solution values are all positive
-                        hasNegative = false;
-                        hasNans = false;
-                        for (int counter = 0; counter < npassive; counter++) {
-                            auto const s_ii = s(counter);
-                            hasNegative |= s_ii <= 0;
-                            hasNans |= std::isnan(s_ii);
+                    // done if solution values are all positive
+                    hasNegative = 0;
+                    hasNans = 0;
+
+                    tile.sync();
+
+                    for (int counter = thrdIdx; counter < npassive; counter += numThrd) {
+                        auto const s_ii = s(counter);
+                        atomicOr(&hasNegative, s_ii <= 0);
+                        atomicOr(&hasNans, std::isnan(s_ii));
+                    }
+
+
+                    tile.sync();
+
+                    // FIXME: temporary solution. my cholesky impl is unstable yielding nans
+                    // this check removes nans - do not accept solution unless all values
+                    // are stable
+                    if (hasNans)
+                        break;
+
+
+                    if (!hasNegative) {
+                        for (int i = thrdIdx; i < npassive; i += numThrd) {
+                            auto const i_real = pulseOffsets(i);
+                            solution(i_real) = s(i);
                         }
 
-                        // FIXME: temporary solution. my cholesky impl is unstable yielding nans
-                        // this check removes nans - do not accept solution unless all values
-                        // are stable
-                        if (hasNans)
-                            break;
-                        if (!hasNegative) {
-                            for (int i = 0; i < npassive; i++) {
-                                auto const i_real = pulseOffsets(i);
-                                solution(i_real) = s(i);
-                            }
-                            //solution.head(npassive) = s.head(npassive);
-                            recompute = false;
-                            break;
-                        }
+                        //tile.sync();
+                        //solution.head(npassive) = s.head(npassive);
+                        recompute = false;
+                        break;
+                    }
+
+
+                    if (thrdIdx == 0) {
 
                         // there were negative values -> have to recompute the whole decomp
                         recompute = true;
@@ -879,6 +895,7 @@ namespace calo {
                         Eigen::numext::swap(pulseOffsets.coeffRef(npassive), pulseOffsets.coeffRef(alpha_idx));
                     }
                 }
+
 
                 if (thrdIdx == 0) {
                     // as in cpu
