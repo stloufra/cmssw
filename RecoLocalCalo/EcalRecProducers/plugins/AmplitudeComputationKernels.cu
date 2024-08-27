@@ -202,6 +202,18 @@ namespace ecal {
             bool *shrrecomputeStorage = reinterpret_cast<bool *>(myPlace) + tileIdx;
             myPlace += sizeof(bool) * numTile;
 
+            int *shrnpassiveStorage = reinterpret_cast<int *>(myPlace) + tileIdx;
+            myPlace +=  sizeof(int) * numTile;
+
+            bool *shrhasNegativeStorage = reinterpret_cast<bool *>(myPlace) + tileIdx;
+            myPlace += sizeof(bool) * numTile;
+
+            bool *shrhasNansStorage = reinterpret_cast<bool *>(myPlace) + tileIdx;
+            myPlace += sizeof(bool) * numTile;
+
+            float *shrsFnnlsStorage = reinterpret_cast<float *>(myPlace) + tileIdx * NSAMPLES;
+            myPlace += NSAMPLES * sizeof(float) * numTile;
+
             //---------------VARIABLES DECLARATION------------------------
             float &chi2 = *shrchi2Storage;
             float &chi2_now = *shrchi2_nowStorage;
@@ -218,12 +230,17 @@ namespace ecal {
             Eigen::Index& w_max_idx_prev = *shrw_max_idx_prevStorage;
 
             bool &recompute = *shrrecomputeStorage;
+            bool &hasNegative = *shrhasNegativeStorage;
+            bool &hasNans = *shrhasNansStorage;
+
+            int &npassive = *shrnpassiveStorage;
 
 
             Eigen::Map <calo::multifit::ColumnVector<NPULSES, int>> pulseOffsets(shrpulseOffsetsStorage);
             Eigen::Map <calo::multifit::ColumnVector<NPULSES, DataType>> resultAmplitudes(shrresultAmplitudesStorage);
             Eigen::Map <calo::multifit::ColMajorMatrix<NSAMPLES, NPULSES>> A(shrAStorage);
             Eigen::Map <ecal::multifit::SampleVector> Atb(shrAtbStorage);
+            Eigen::Map <calo::multifit::ColumnVector<NPULSES, float>> sFnnls(shrsFnnlsStorage);
 
 
             DataType *covMatrixStorage = shrMatrixLForFnnlsStorage;
@@ -256,7 +273,7 @@ namespace ecal {
                 auto const hashedId = isBarrel ? ecal::reconstruction::hashedIndexEB(did.rawId())
                                                : offsetForHashes + ecal::reconstruction::hashedIndexEE(did.rawId());
 
-                int npassive = 0;
+                npassive = 0;
 
                 CMS_UNROLL_LOOP
 
@@ -360,6 +377,7 @@ namespace ecal {
                                                   resultAmplitudes,
                                                   npassive,
                                                   pulseOffsets,
+                                                  sFnnls,
                                                   matrixLForFnnls,
                                                   1e-11,
                                                   500,
@@ -371,6 +389,9 @@ namespace ecal {
                                                   w_max_idx_prev,
                                                   recompute,
                                                   sumsq2,
+                                                  hasNegative,
+                                                  hasNans,
+                                                  reg_b_tmp,
                                                   tile);
 
                     if (thrdIdx == 0) { //TODO: this is not done
@@ -457,6 +478,8 @@ namespace ecal {
                                             + sizeof(float) //w_max
                                             + sizeof(float) //w_max_prev
                                             + sizeof(bool)  //recompute
+                                            + sizeof(int)   //npassive
+                                            + sizeof(float) * SampleMatrix::RowsAtCompileTime //s
                                            )
                                            / __SIZE_OF_TILE_MULTIFIT__);
 
