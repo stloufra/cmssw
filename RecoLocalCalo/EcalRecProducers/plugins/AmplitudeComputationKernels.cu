@@ -385,10 +385,10 @@ namespace ecal {
                                                   pulseOffsets,
                                                   sFnnls,
                                                   matrixLForFnnls,
-                                                  eps,
-                                                  500,
-                                                  16,
-                                                  2,
+                                                  eps, //eps
+                                                  500, //max iterations
+                                                  16,  //relaxperiod
+                                                  2,   //relax factor
                                                   w_max,
                                                   w_max_prev,
                                                   w_max_idx,

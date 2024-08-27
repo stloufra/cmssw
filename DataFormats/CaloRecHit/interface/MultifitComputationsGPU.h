@@ -742,13 +742,13 @@ namespace calo {
                 if (iter > 0 || npassive == 0) {
 
 
-                        auto const nactive = NPULSES - npassive;
-                        // exit if there are no more pulses to constrain
-                        if (nactive == 0)
-                            break;
+                    auto const nactive = NPULSES - npassive;
+                    // exit if there are no more pulses to constrain
+                    if (nactive == 0)
+                        break;
 
-                        w_max_idx = 0;
-                        w_max = -std::numeric_limits<float>::max();
+                    w_max_idx = 0;
+                    w_max = -std::numeric_limits<float>::max();
 
                     if (thrdIdx == 0) {
                         for (int icol = npassive; icol <
@@ -796,7 +796,7 @@ namespace calo {
 
                 if (thrdIdx == 0) {
                     // inner loop
-                    while (true) {
+                    for (int HMT = 0; HMT < maxIterations; HMT++) {
                         if (npassive == 0)
                             break;
 
@@ -878,9 +878,10 @@ namespace calo {
 
                         Eigen::numext::swap(pulseOffsets.coeffRef(npassive), pulseOffsets.coeffRef(alpha_idx));
                     }
+                }
 
+                if (thrdIdx == 0) {
                     // as in cpu
-                    ++iter;
                     if (iter % relaxationPeriod == 0)
                         eps *= relaxationFactor;
                 }
