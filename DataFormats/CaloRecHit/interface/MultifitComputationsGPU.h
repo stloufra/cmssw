@@ -813,20 +813,28 @@ namespace calo {
                         else
                             update_decomposition_forwardsubst_with_offsets(matrixL, AtA, reg_b, Atb, npassive,
                                                                            pulseOffsets);
+                    }
 
                         // run backward substituion
                         s(npassive - 1) = reg_b[npassive - 1] / matrixL(npassive - 1, npassive - 1);
 
 
-                        for (int i = npassive - 2;
-                             i >= 0; i--) { //for (int i = npassive - 2 - idx; i >= 0; i-= tile.num_threads()) {
-                            float total = 0;
-                            for (int j = i + 1; j < npassive; j++)
-                                total += matrixL(j, i) * s(j);
 
-                            s(i) = (reg_b[i] - total) / matrixL(i, i);
+                    sumsq2 = 0;
+                    tile.sync();
+
+                    for (int i = npassive - 2; i >= 0; i--) {
+                        for (int j = i + 1 + thrdIdx; j < npassive; j+=numThrd){
+                            atomicAdd(&sumsq2, matrixL(j, i) * s(j) );}
+
+                        tile.sync();
+
+                        if(thrdIdx ==0) {
+                            s(i) = (reg_b[i] - sumsq2) / matrixL(i, i);
+                            sumsq2 = 0;
                         }
                     }
+
 
                     // done if solution values are all positive
                     hasNegative = 0;
@@ -863,35 +871,41 @@ namespace calo {
                     }
 
 
-                    if (thrdIdx == 0) {
+
 
                         // there were negative values -> have to recompute the whole decomp
                         recompute = true;
 
-                        auto alpha = std::numeric_limits<float>::max();
-                        Eigen::Index alpha_idx = 0, alpha_idx_real = 0;
+                        sumsq2 = std::numeric_limits<float>::max(); //alpha
+
+                    Eigen::Index alpha_idx = 0, alpha_idx_real = 0;
+
+                    if (thrdIdx == 0) {
                         for (int i = 0; i < npassive; i++) {
                             if (s[i] <= 0.) {
                                 auto const i_real = pulseOffsets(i);
                                 auto const ratio = solution[i_real] / (solution[i_real] - s[i]);
-                                if (ratio < alpha) {
-                                    alpha = ratio;
+                                if (ratio < sumsq2) {
+                                    sumsq2 = ratio;
                                     alpha_idx = i;
-                                    alpha_idx_real = i_real;
+                                    alpha_idx_real = i_real; //atomicMax
                                 }
                             }
                         }
+                    }
 
-                        // upadte solution
-                        for (int i = 0; i < npassive; i++) {
-                            auto const i_real = pulseOffsets(i);
-                            solution(i_real) += alpha * (s(i) - solution(i_real));
-                        }
-                        //solution.head(npassive) += alpha *
-                        //    (s.head(npassive) - solution.head(npassive));
+                    tile.sync();
+
+                    // upadte solution
+                    for (int i = 0; i < npassive; i++) {
+                        auto const i_real = pulseOffsets(i);
+                        solution(i_real) += sumsq2 * (s(i) - solution(i_real));
+                    }
+
+
+                   if (thrdIdx == 0) {
                         solution[alpha_idx_real] = 0;
                         --npassive;
-
                         Eigen::numext::swap(pulseOffsets.coeffRef(npassive), pulseOffsets.coeffRef(alpha_idx));
                     }
                 }
