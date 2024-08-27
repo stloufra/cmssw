@@ -194,7 +194,7 @@ namespace calo {
             }
         }
 
-        template<typename MatrixType1, typename MatrixType2, typename VectorType>//, unsigned int TileSize>
+        template<typename MatrixType1, typename MatrixType2, typename VectorType, unsigned int TileSize>//, unsigned int TileSize>
         EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC
 
         void compute_decomposition_forwardsubst_with_offsets(
@@ -203,44 +203,50 @@ namespace calo {
                 float b[MatrixType1::stride], //reg_b
                 VectorType const &Atb, //Atb
                 int const N, //npasssive
-                ColumnVector<MatrixType1::stride, int> const &pulseOffsets
-        ) { //cg::thread_block_tile<TileSize>& tile
+                ColumnVector<MatrixType1::stride, int> const &pulseOffsets,
+                float &sumsq2,
+                cg::thread_block_tile <TileSize> &tile) {
 
-            //const auto idx = tile.thread_rank();
+            auto const thrdIdx = tile.thread_rank();
+            auto const numThrd = tile.num_threads();
+
+            if (thrdIdx == 0) {
+
+                auto const real_0 = pulseOffsets(0);
+                auto const sqrtm_0_0 = std::sqrt(M(real_0, real_0));
+                L(0, 0) = sqrtm_0_0;
+                using T = typename MatrixType1::base_type;
+                b[0] = Atb(real_0) / sqrtm_0_0;
+
+                for (int i = 1; i < N; i++) { //for (int i = idx + 1; i < N; i+=tile.num_threads()) {
+                    auto const i_real = pulseOffsets(i);
+                    T sumsq{0};
+                    T total = 0;
+                    auto const atb = Atb(i_real);
+                    for (int j = 0; j < i; j++) {
+                        auto const j_real = pulseOffsets(j);
+                        sumsq2 = 0;
+                        auto const m_i_j = M(std::max(i_real, j_real), std::min(i_real, j_real));
+
+                        for (int k = 0; k < j; k++)
+                            sumsq2 += L(i, k) * L(j, k);
 
 
-            auto const real_0 = pulseOffsets(0);
-            auto const sqrtm_0_0 = std::sqrt(M(real_0, real_0));
-            L(0, 0) = sqrtm_0_0;
-            using T = typename MatrixType1::base_type;
-            b[0] = Atb(real_0) / sqrtm_0_0;
+                        auto const value_i_j = (m_i_j - sumsq2) / L(j, j);
+                        L(i, j) = value_i_j;
 
-            for (int i = 1; i < N; i++) { //for (int i = idx + 1; i < N; i+=tile.num_threads()) {
-                auto const i_real = pulseOffsets(i);
-                T sumsq{0};
-                T total = 0;
-                auto const atb = Atb(i_real);
-                for (int j = 0; j < i; j++) {
-                    auto const j_real = pulseOffsets(j);
-                    T sumsq2{0};
-                    auto const m_i_j = M(std::max(i_real, j_real), std::min(i_real, j_real));
-                    for (int k = 0; k < j; ++k)
-                        sumsq2 += L(i, k) * L(j, k);
+                        sumsq += value_i_j * value_i_j;
+                        total += value_i_j * b[j];
+                    }
 
-                    auto const value_i_j = (m_i_j - sumsq2) / L(j, j);
-                    L(i, j) = value_i_j;
-
-                    sumsq += value_i_j * value_i_j;
-                    total += value_i_j * b[j];
+                    auto const l_i_i = std::sqrt(M(i_real, i_real) - sumsq);
+                    L(i, i) = l_i_i;
+                    b[i] = (atb - total) / l_i_i;
                 }
-
-                auto const l_i_i = std::sqrt(M(i_real, i_real) - sumsq);
-                L(i, i) = l_i_i;
-                b[i] = (atb - total) / l_i_i;
             }
         }
 
-        template<typename MatrixType1, typename MatrixType2, typename VectorType>
+        template<typename MatrixType1, typename MatrixType2, typename VectorType, unsigned int TileSize>
         EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC
 
         void update_decomposition_forwardsubst_with_offsets(
@@ -249,29 +255,40 @@ namespace calo {
                 float b[MatrixType1::stride],
                 VectorType const &Atb,
                 int const N,
-                ColumnVector<MatrixType1::stride, int> const &pulseOffsets) {
-            using T = typename MatrixType1::base_type;
-            auto const i = N - 1;
-            auto const i_real = pulseOffsets(i);
-            T sumsq{0};
-            T total = 0;
-            for (int j = 0; j < i; j++) {
-                auto const j_real = pulseOffsets(j);
-                T sumsq2{0};
-                auto const m_i_j = M(std::max(i_real, j_real), std::min(i_real, j_real));
-                for (int k = 0; k < j; ++k)
-                    sumsq2 += L(i, k) * L(j, k);
+                ColumnVector<MatrixType1::stride, int> const &pulseOffsets,
+                float &sumsq2,
+                cg::thread_block_tile <TileSize> &tile) {
 
-                auto const value_i_j = (m_i_j - sumsq2) / L(j, j);
-                L(i, j) = value_i_j;
-                sumsq += value_i_j * value_i_j;
+            auto const thrdIdx = tile.thread_rank();
+            auto const numThrd = tile.num_threads();
 
-                total += value_i_j * b[j];
+            if (thrdIdx == 0) {
+
+                using T = typename MatrixType1::base_type;
+                auto const i = N - 1;
+                auto const i_real = pulseOffsets(i);
+                T sumsq{0};
+                T total = 0;
+                for (int j = 0; j < i; j++) {
+                    auto const j_real = pulseOffsets(j);
+                    sumsq2 = 0;
+                    auto const m_i_j = M(std::max(i_real, j_real), std::min(i_real, j_real));
+                    for (int k = 0; k < j; ++k)
+                        sumsq2 += L(i, k) * L(j, k);
+
+                    auto const value_i_j = (m_i_j - sumsq2) / L(j, j);
+                    L(i, j) = value_i_j;
+                    sumsq += value_i_j * value_i_j;
+
+                    total += value_i_j * b[j];
+                }
+
+                auto const l_i_i = std::sqrt(M(i_real, i_real) - sumsq);
+                L(i, i) = l_i_i;
+                b[i] = (Atb(i_real) - total) / l_i_i;
             }
 
-            auto const l_i_i = std::sqrt(M(i_real, i_real) - sumsq);
-            L(i, i) = l_i_i;
-            b[i] = (Atb(i_real) - total) / l_i_i;
+            tile.sync();
         }
 
         template<typename MatrixType1, typename MatrixType2, typename MatrixType3, unsigned int TileSize>
@@ -521,188 +538,6 @@ namespace calo {
         }
 
         // TODO: add active bxs
-        template<typename MatrixType, typename MapType, typename DataType>
-        //, unsigned int TileSize>
-        EIGEN_DEVICE_FUNC void fnnls(MatrixType const &AtA,
-                                     MapType const &Atb,
-                                     Eigen::Map <calo::multifit::ColumnVector<MapType::RowsAtCompileTime, DataType>> solution, //resultAmplitudes
-                                     int &npassive,
-                                     Eigen::Map <calo::multifit::ColumnVector<MapType::RowsAtCompileTime, int>> pulseOffsets, //pulseOffsets
-                                     MapSymM<float, MapType::RowsAtCompileTime> &matrixL, //matrixLForFnnls
-                                     double eps,                    // convergence condition
-                                     const int maxIterations,       // maximum number of iterations
-                                     const int relaxationPeriod,    // every "relaxationPeriod" iterations
-                                     const int relaxationFactor) {
-
-
-            typedef Eigen::Matrix<DataType, 10, 1> VectorType;
-            //using VectorType = MapType::Base;
-            constexpr auto NPULSES = 10; //VectorType::RowsAtCompileTime;
-            //,
-            //cg::thread_block_tile<TileSize>& tile) {  // multiply "eps" by "relaxationFactor"
-            // Get the thread number within the group
-            //const auto idx = tile.thread_rank();
-
-            //if (idx == 0) {
-            // constants //10
-
-
-            // to keep track of where to terminate if converged
-            Eigen::Index w_max_idx_prev = 0;
-            float w_max_prev = 0;
-            bool recompute = false;
-
-            // used throughout
-            VectorType s;
-            float reg_b[NPULSES];
-            //float matrixLStorage[MapSymM<float, NPULSES>::total];
-            //MapSymM<float, NPULSES> matrixL{matrixLStorage};
-
-            int iter = 0;
-            while (true) {
-                if (iter > 0 || npassive == 0) {
-                    auto const nactive = NPULSES - npassive;
-                    // exit if there are no more pulses to constrain
-                    if (nactive == 0)
-                        break;
-
-                    // compute the gradient
-                    //w.tail(nactive) = Atb.tail(nactive) - (AtA * solution).tail(nactive);
-                    Eigen::Index w_max_idx = 0;
-                    float w_max = -std::numeric_limits<float>::max();
-
-
-                    for (int icol = npassive; icol <
-                                              NPULSES; icol++) { // for (int icol = idx + npassive; icol < NPULSES; icol+= tile.num_threads()) {
-                        auto const icol_real = pulseOffsets(icol);
-                        auto const atb = Atb(icol_real);
-                        float sum = 0;
-                        CMS_UNROLL_LOOP
-                        for (int counter = 0; counter < NPULSES; counter++)
-                            sum += counter > icol_real ? AtA(counter, icol_real) * solution(counter)
-                                                       : AtA(icol_real, counter) * solution(counter);
-
-                        auto const w = atb - sum;
-                        if (w > w_max) {
-                            w_max = w;
-                            w_max_idx = icol - npassive;
-                        }
-                    }
-
-                    //tile.sync();
-                    // check for convergence
-                    if (w_max < eps || (w_max_idx == w_max_idx_prev && w_max == w_max_prev))
-                        break;
-
-                    if (iter >= maxIterations)
-                        break;
-
-                    w_max_prev = w_max;
-                    w_max_idx_prev = w_max_idx;
-
-                    // move index to the right part of the vector
-                    //if(idx == 0) {
-                    w_max_idx += npassive;
-
-                    Eigen::numext::swap(pulseOffsets.coeffRef(npassive),
-                                        pulseOffsets.coeffRef(w_max_idx)); // coefRef is O(log) binary search
-                    ++npassive;
-                    //}
-                }
-
-                // inner loop
-                while (true) {
-                    if (npassive == 0)
-                        break;
-
-                    //s.head(npassive)
-                    //auto const& matrixL =
-                    //    AtA.topLeftCorner(npassive, npassive)
-                    //        .llt().matrixL();
-                    //.solve(Atb.head(npassive));
-                    if (recompute || iter == 0)
-                        compute_decomposition_forwardsubst_with_offsets(matrixL, AtA, reg_b, Atb, npassive,
-                                                                        pulseOffsets);//, tile);
-                    else
-                        update_decomposition_forwardsubst_with_offsets(matrixL, AtA, reg_b, Atb, npassive,
-                                                                       pulseOffsets);
-
-                    // run backward substituion
-                    s(npassive - 1) = reg_b[npassive - 1] / matrixL(npassive - 1, npassive - 1);
-
-
-                    for (int i = npassive - 2;
-                         i >= 0; i--) { //for (int i = npassive - 2 - idx; i >= 0; i-= tile.num_threads()) {
-                        float total = 0;
-                        for (int j = i + 1; j < npassive; j++)
-                            total += matrixL(j, i) * s(j);
-
-                        s(i) = (reg_b[i] - total) / matrixL(i, i);
-                    }
-
-                    // done if solution values are all positive
-                    bool hasNegative = false;
-                    bool hasNans = false;
-                    for (int counter = 0; counter < npassive; counter++) {
-                        auto const s_ii = s(counter);
-                        hasNegative |= s_ii <= 0;
-                        hasNans |= std::isnan(s_ii);
-                    }
-
-                    // FIXME: temporary solution. my cholesky impl is unstable yielding nans
-                    // this check removes nans - do not accept solution unless all values
-                    // are stable
-                    if (hasNans)
-                        break;
-                    if (!hasNegative) {
-                        for (int i = 0; i < npassive; i++) {
-                            auto const i_real = pulseOffsets(i);
-                            solution(i_real) = s(i);
-                        }
-                        //solution.head(npassive) = s.head(npassive);
-                        recompute = false;
-                        break;
-                    }
-
-                    // there were negative values -> have to recompute the whole decomp
-                    recompute = true;
-
-                    auto alpha = std::numeric_limits<float>::max();
-                    Eigen::Index alpha_idx = 0, alpha_idx_real = 0;
-                    for (int i = 0; i < npassive; i++) {
-                        if (s[i] <= 0.) {
-                            auto const i_real = pulseOffsets(i);
-                            auto const ratio = solution[i_real] / (solution[i_real] - s[i]);
-                            if (ratio < alpha) {
-                                alpha = ratio;
-                                alpha_idx = i;
-                                alpha_idx_real = i_real;
-                            }
-                        }
-                    }
-
-                    // upadte solution
-                    for (int i = 0; i < npassive; i++) {
-                        auto const i_real = pulseOffsets(i);
-                        solution(i_real) += alpha * (s(i) - solution(i_real));
-                    }
-                    //solution.head(npassive) += alpha *
-                    //    (s.head(npassive) - solution.head(npassive));
-                    solution[alpha_idx_real] = 0;
-                    --npassive;
-
-                    Eigen::numext::swap(pulseOffsets.coeffRef(npassive), pulseOffsets.coeffRef(alpha_idx));
-                }
-
-                // as in cpu
-                ++iter;
-                if (iter % relaxationPeriod == 0)
-                    eps *= relaxationFactor;
-            }
-            //}
-        }
-
-        // TODO: add active bxs
         template<typename MatrixType, typename MapType, typename DataType, unsigned int TileSize>
         //, unsigned int TileSize>
         EIGEN_DEVICE_FUNC void fnnls_coop(MatrixType const &AtA,
@@ -801,7 +636,7 @@ namespace calo {
                     if (npassive == 0)
                         break;
 
-                    if (thrdIdx == 0) {
+                   // if (thrdIdx == 0) {
                         //s.head(npassive)
                         //auto const& matrixL =
                         //    AtA.topLeftCorner(npassive, npassive)
@@ -809,27 +644,27 @@ namespace calo {
                         //.solve(Atb.head(npassive));
                         if (recompute || iter == 0)
                             compute_decomposition_forwardsubst_with_offsets(matrixL, AtA, reg_b, Atb, npassive,
-                                                                            pulseOffsets);//, tile);
+                                                                            pulseOffsets, sumsq2, tile);
                         else
                             update_decomposition_forwardsubst_with_offsets(matrixL, AtA, reg_b, Atb, npassive,
-                                                                           pulseOffsets);
-                    }
+                                                                           pulseOffsets, sumsq2, tile);
+                    //}
 
-                        // run backward substituion
-                        s(npassive - 1) = reg_b[npassive - 1] / matrixL(npassive - 1, npassive - 1);
-
+                    // run backward substituion
+                    s(npassive - 1) = reg_b[npassive - 1] / matrixL(npassive - 1, npassive - 1);
 
 
                     sumsq2 = 0;
                     tile.sync();
 
                     for (int i = npassive - 2; i >= 0; i--) {
-                        for (int j = i + 1 + thrdIdx; j < npassive; j+=numThrd){
-                            atomicAdd(&sumsq2, matrixL(j, i) * s(j) );}
+                        for (int j = i + 1 + thrdIdx; j < npassive; j += numThrd) {
+                            atomicAdd(&sumsq2, matrixL(j, i) * s(j));
+                        }
 
                         tile.sync();
 
-                        if(thrdIdx ==0) {
+                        if (thrdIdx == 0) {
                             s(i) = (reg_b[i] - sumsq2) / matrixL(i, i);
                             sumsq2 = 0;
                         }
@@ -871,12 +706,10 @@ namespace calo {
                     }
 
 
+                    // there were negative values -> have to recompute the whole decomp
+                    recompute = true;
 
-
-                        // there were negative values -> have to recompute the whole decomp
-                        recompute = true;
-
-                        sumsq2 = std::numeric_limits<float>::max(); //alpha
+                    sumsq2 = std::numeric_limits<float>::max(); //alpha
 
                     Eigen::Index alpha_idx = 0, alpha_idx_real = 0;
 
@@ -903,7 +736,7 @@ namespace calo {
                     }
 
 
-                   if (thrdIdx == 0) {
+                    if (thrdIdx == 0) {
                         solution[alpha_idx_real] = 0;
                         --npassive;
                         Eigen::numext::swap(pulseOffsets.coeffRef(npassive), pulseOffsets.coeffRef(alpha_idx));
@@ -923,7 +756,6 @@ namespace calo {
 
             tile.sync();
         }
-
 
     }  // namespace multifit
 }  // namespace calo
