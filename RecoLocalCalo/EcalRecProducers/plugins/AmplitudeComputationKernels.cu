@@ -214,6 +214,9 @@ namespace ecal {
             float *shrsFnnlsStorage = reinterpret_cast<float *>(myPlace) + tileIdx * NSAMPLES;
             myPlace += NSAMPLES * sizeof(float) * numTile;
 
+            double *shrEpsStorage = reinterpret_cast<double *>(myPlace) + tileIdx;
+            myPlace += sizeof(double) * numTile;
+
             //---------------VARIABLES DECLARATION------------------------
             float &chi2 = *shrchi2Storage;
             float &chi2_now = *shrchi2_nowStorage;
@@ -235,6 +238,7 @@ namespace ecal {
 
             int &npassive = *shrnpassiveStorage;
 
+            double& eps = *shrEpsStorage;
 
             Eigen::Map <calo::multifit::ColumnVector<NPULSES, int>> pulseOffsets(shrpulseOffsetsStorage);
             Eigen::Map <calo::multifit::ColumnVector<NPULSES, DataType>> resultAmplitudes(shrresultAmplitudesStorage);
@@ -368,6 +372,8 @@ namespace ecal {
                         Atb(icol) = sum_atb;
                     }
 
+                    eps = 1e-11;
+
                     tile.sync();
 
 
@@ -379,7 +385,7 @@ namespace ecal {
                                                   pulseOffsets,
                                                   sFnnls,
                                                   matrixLForFnnls,
-                                                  1e-11,
+                                                  eps,
                                                   500,
                                                   16,
                                                   2,
@@ -480,6 +486,7 @@ namespace ecal {
                                             + sizeof(bool)  //recompute
                                             + sizeof(int)   //npassive
                                             + sizeof(float) * SampleMatrix::RowsAtCompileTime //s
+                                            + sizeof(double) //eps
                                            )
                                            / __SIZE_OF_TILE_MULTIFIT__);
 

@@ -707,19 +707,19 @@ namespace calo {
         //, unsigned int TileSize>
         EIGEN_DEVICE_FUNC void fnnls_coop(MatrixType const &AtA,
                                           MapType const &Atb,
-                                          Eigen::Map <calo::multifit::ColumnVector<MapType::RowsAtCompileTime, DataType>> solution, //resultAmplitudes
+                                          Eigen::Map <calo::multifit::ColumnVector<MapType::RowsAtCompileTime, DataType>>& solution, //resultAmplitudes
                                           int &npassive,
-                                          Eigen::Map <calo::multifit::ColumnVector<MapType::RowsAtCompileTime, int>> pulseOffsets, //pulseOffsets
-                                          Eigen::Map <calo::multifit::ColumnVector<MapType::RowsAtCompileTime, float>> s,
+                                          Eigen::Map <calo::multifit::ColumnVector<MapType::RowsAtCompileTime, int>>& pulseOffsets, //pulseOffsets
+                                          Eigen::Map <calo::multifit::ColumnVector<MapType::RowsAtCompileTime, float>>& s,
                                           MapSymM<float, MapType::RowsAtCompileTime> &matrixL, //matrixLForFnnls
-                                          double eps,                    // convergence condition
+                                          double &eps,                    // convergence condition
                                           const int maxIterations,       // maximum number of iterations
                                           const int relaxationPeriod,    // every "relaxationPeriod" iterations
                                           const int relaxationFactor,
                                           float &w_max,
                                           float &w_max_prev,
-                                          Eigen::Index w_max_idx,
-                                          Eigen::Index w_max_idx_prev,
+                                          Eigen::Index& w_max_idx,
+                                          Eigen::Index& w_max_idx_prev,
                                           bool &recompute,
                                           float &sumsq2,
                                           bool &hasNegative,
@@ -738,8 +738,10 @@ namespace calo {
             recompute = false;
 
             for (int iter = 0; iter < maxIterations; iter++) {
-                if (thrdIdx == 0) {
-                    if (iter > 0 || npassive == 0) {
+
+                if (iter > 0 || npassive == 0) {
+
+
                         auto const nactive = NPULSES - npassive;
                         // exit if there are no more pulses to constrain
                         if (nactive == 0)
@@ -748,7 +750,7 @@ namespace calo {
                         w_max_idx = 0;
                         w_max = -std::numeric_limits<float>::max();
 
-
+                    if (thrdIdx == 0) {
                         for (int icol = npassive; icol <
                                                   NPULSES; icol++) { // for (int icol = idx + npassive; icol < NPULSES; icol+= tile.num_threads()) {
                             auto const icol_real = pulseOffsets(icol);
@@ -765,26 +767,32 @@ namespace calo {
                                 w_max_idx = icol - npassive;
                             }
                         }
+                    }
 
-                        //tile.sync();
-                        // check for convergence
-                        if (w_max < eps || (w_max_idx == w_max_idx_prev && w_max == w_max_prev))
-                            break;
+                    tile.sync();
+                    // check for convergence
+                    if (w_max < eps || (w_max_idx == w_max_idx_prev && w_max == w_max_prev))
+                        break;
 
+                    tile.sync();
 
-                        w_max_prev = w_max;
-                        w_max_idx_prev = w_max_idx;
+                    w_max_prev = w_max;
+                    w_max_idx_prev = w_max_idx;
 
-                        // move index to the right part of the vector
-                        //if(idx == 0) {
+                    tile.sync();
+
+                    // move index to the right part of the vector
+                    if (thrdIdx == 0) {
                         w_max_idx += npassive;
 
                         Eigen::numext::swap(pulseOffsets.coeffRef(npassive),
                                             pulseOffsets.coeffRef(w_max_idx)); // coefRef is O(log) binary search
                         ++npassive;
-                        //}
                     }
+
+                    tile.sync();
                 }
+
 
                 if (thrdIdx == 0) {
                     // inner loop
@@ -876,7 +884,12 @@ namespace calo {
                     if (iter % relaxationPeriod == 0)
                         eps *= relaxationFactor;
                 }
+
+                tile.sync();
+
             }
+
+            tile.sync();
         }
 
 
