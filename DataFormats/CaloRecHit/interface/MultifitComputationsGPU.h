@@ -745,8 +745,8 @@ namespace calo {
                         if (nactive == 0)
                             break;
 
-                        Eigen::Index w_max_idx = 0;
-                        float w_max = -std::numeric_limits<float>::max();
+                        w_max_idx = 0;
+                        w_max = -std::numeric_limits<float>::max();
 
 
                         for (int icol = npassive; icol <
@@ -770,7 +770,7 @@ namespace calo {
                         // check for convergence
                         if (w_max < eps || (w_max_idx == w_max_idx_prev && w_max == w_max_prev))
                             break;
-                        
+
 
                         w_max_prev = w_max;
                         w_max_idx_prev = w_max_idx;
@@ -784,7 +784,9 @@ namespace calo {
                         ++npassive;
                         //}
                     }
+                }
 
+                if (thrdIdx == 0) {
                     // inner loop
                     while (true) {
                         if (npassive == 0)
