@@ -210,7 +210,7 @@ namespace calo {
             auto const thrdIdx = tile.thread_rank();
             auto const numThrd = tile.num_threads();
 
-            if (thrdIdx == 0) {
+            //if (thrdIdx == 0) {
 
                 auto const real_0 = pulseOffsets(0);
                 auto const sqrtm_0_0 = std::sqrt(M(real_0, real_0));
@@ -228,9 +228,11 @@ namespace calo {
                         sumsq2 = 0;
                         auto const m_i_j = M(std::max(i_real, j_real), std::min(i_real, j_real));
 
-                        for (int k = 0; k < j; k++)
-                            sumsq2 += L(i, k) * L(j, k);
-
+                        for (int k = thrdIdx; k < j; k+=numThrd){
+#ifdef __CUDA_ARCH__
+                            atomicAdd(&sumsq2, L(i, k) * L(j, k));}
+#endif
+                        tile.sync();
 
                         auto const value_i_j = (m_i_j - sumsq2) / L(j, j);
                         L(i, j) = value_i_j;
@@ -243,7 +245,7 @@ namespace calo {
                     L(i, i) = l_i_i;
                     b[i] = (atb - total) / l_i_i;
                 }
-            }
+            //}
         }
 
         template<typename MatrixType1, typename MatrixType2, typename VectorType, unsigned int TileSize>
@@ -262,7 +264,7 @@ namespace calo {
             auto const thrdIdx = tile.thread_rank();
             auto const numThrd = tile.num_threads();
 
-            if (thrdIdx == 0) {
+            //if (thrdIdx == 0) {
 
                 using T = typename MatrixType1::base_type;
                 auto const i = N - 1;
@@ -273,8 +275,11 @@ namespace calo {
                     auto const j_real = pulseOffsets(j);
                     sumsq2 = 0;
                     auto const m_i_j = M(std::max(i_real, j_real), std::min(i_real, j_real));
-                    for (int k = 0; k < j; ++k)
-                        sumsq2 += L(i, k) * L(j, k);
+                    for (int k = thrdIdx; k < j; k+=numThrd){
+#ifdef __CUDA_ARCH__
+                        atomicAdd(&sumsq2, L(i, k) * L(j, k));}
+#endif
+                    tile.sync();
 
                     auto const value_i_j = (m_i_j - sumsq2) / L(j, j);
                     L(i, j) = value_i_j;
@@ -286,7 +291,7 @@ namespace calo {
                 auto const l_i_i = std::sqrt(M(i_real, i_real) - sumsq);
                 L(i, i) = l_i_i;
                 b[i] = (Atb(i_real) - total) / l_i_i;
-            }
+            //}
 
             tile.sync();
         }
