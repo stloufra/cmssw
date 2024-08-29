@@ -210,50 +210,50 @@ namespace calo {
             auto const thrdIdx = tile.thread_rank();
             auto const numThrd = tile.num_threads();
 
-                sumsq2 = 0;
+            sumsq2 = 0;
 
-                auto const real_0 = pulseOffsets(0);
-                auto const sqrtm_0_0 = std::sqrt(M(real_0, real_0));
-                L(0, 0) = sqrtm_0_0;
-                using T = typename MatrixType1::base_type;
-                b[0] = Atb(real_0) / sqrtm_0_0;
-
-
-                for (int i = 1; i < N; i++) { //for (int i = idx + 1; i < N; i+=tile.num_threads()) {
-                    auto const i_real = pulseOffsets(i);
-                    T sumsq{0};
-                    T total = 0;
-                    auto const atb = Atb(i_real);
-                    for (int j = 0; j < i; j++) {
-
-                        auto const j_real = pulseOffsets(j);
-                        auto const m_i_j = M(std::max(i_real, j_real), std::min(i_real, j_real));
-
-                        for (int k = thrdIdx; k < j; k+=numThrd){
-                            atomicAdd(&sumsq2,L(i, k) * L(j, k));
-                        }
-
-                        tile.sync();
+            auto const real_0 = pulseOffsets(0);
+            auto const sqrtm_0_0 = std::sqrt(M(real_0, real_0));
+            L(0, 0) = sqrtm_0_0;
+            using T = typename MatrixType1::base_type;
+            b[0] = Atb(real_0) / sqrtm_0_0;
 
 
-                        auto const value_i_j = (m_i_j - sumsq2) / L(j, j);
-                        L(i, j) = value_i_j;
+            for (int i = 1; i < N; i++) { //for (int i = idx + 1; i < N; i+=tile.num_threads()) {
+                auto const i_real = pulseOffsets(i);
+                T sumsq{0};
+                T total = 0;
+                auto const atb = Atb(i_real);
+                for (int j = 0; j < i; j++) {
 
-                        sumsq += value_i_j * value_i_j;
-                        total += value_i_j * b[j];
+                    auto const j_real = pulseOffsets(j);
+                    auto const m_i_j = M(std::max(i_real, j_real), std::min(i_real, j_real));
 
-                        tile.sync();
-
-                        sumsq2 = 0;
+                    for (int k = thrdIdx; k < j; k += numThrd) {
+                        atomicAdd(&sumsq2, L(i, k) * L(j, k));
                     }
 
                     tile.sync();
 
 
-                    auto const l_i_i = std::sqrt(M(i_real, i_real) - sumsq);
-                    L(i, i) = l_i_i;
-                    b[i] = (atb - total) / l_i_i;
+                    auto const value_i_j = (m_i_j - sumsq2) / L(j, j);
+                    L(i, j) = value_i_j;
+
+                    sumsq += value_i_j * value_i_j;
+                    total += value_i_j * b[j];
+
+                    tile.sync();
+
+                    sumsq2 = 0;
                 }
+
+                tile.sync();
+
+
+                auto const l_i_i = std::sqrt(M(i_real, i_real) - sumsq);
+                L(i, i) = l_i_i;
+                b[i] = (atb - total) / l_i_i;
+            }
 
 
         }
@@ -276,37 +276,37 @@ namespace calo {
             auto const thrdIdx = tile.thread_rank();
             auto const numThrd = tile.num_threads();
 
-                using T = typename MatrixType1::base_type;
-                auto const i = N - 1;
-                auto const i_real = pulseOffsets(i);
-                T sumsq{0};
-                T total = 0;
-                for (int j = 0; j < i; j++) {
-                    auto const j_real = pulseOffsets(j);
-                    auto const m_i_j = M(std::max(i_real, j_real), std::min(i_real, j_real));
-                    for (int k = thrdIdx; k < j; k+=numThrd){
-                        atomicAdd(&sumsq2,L(i, k) * L(j, k));
-                    }
-
-                    tile.sync();
-
-                    auto const value_i_j = (m_i_j - sumsq2) / L(j, j);
-                    L(i, j) = value_i_j;
-                    sumsq += value_i_j * value_i_j;
-
-                    total += value_i_j * b[j];
-
-                    tile.sync();
-
-                    sumsq2 = 0;
-
+            using T = typename MatrixType1::base_type;
+            auto const i = N - 1;
+            auto const i_real = pulseOffsets(i);
+            T sumsq{0};
+            T total = 0;
+            for (int j = 0; j < i; j++) {
+                auto const j_real = pulseOffsets(j);
+                auto const m_i_j = M(std::max(i_real, j_real), std::min(i_real, j_real));
+                for (int k = thrdIdx; k < j; k += numThrd) {
+                    atomicAdd(&sumsq2, L(i, k) * L(j, k));
                 }
 
                 tile.sync();
 
-                auto const l_i_i = std::sqrt(M(i_real, i_real) - sumsq);
-                L(i, i) = l_i_i;
-                b[i] = (Atb(i_real) - total) / l_i_i;
+                auto const value_i_j = (m_i_j - sumsq2) / L(j, j);
+                L(i, j) = value_i_j;
+                sumsq += value_i_j * value_i_j;
+
+                total += value_i_j * b[j];
+
+                tile.sync();
+
+                sumsq2 = 0;
+
+            }
+
+            tile.sync();
+
+            auto const l_i_i = std::sqrt(M(i_real, i_real) - sumsq);
+            L(i, i) = l_i_i;
+            b[i] = (Atb(i_real) - total) / l_i_i;
 
             tile.sync();
         }
@@ -463,37 +463,53 @@ namespace calo {
         }
 
 
-        template<typename MatrixType1, typename MatrixType2, typename MatrixType3, typename MatrixType4>
+        template<typename MatrixType1, typename MatrixType2, typename MatrixType3, typename MatrixType4, unsigned int TileSize>
         EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC
 
-        void calculateChiSq(MatrixType1 const &matrixL,
-                            MatrixType2 const &pulseMatrixView,
-                            MatrixType3 const &resultAmplitudesVector,
-                            MatrixType4 const &inputAmplitudesView,
-                            float &chi2) {
+        void calculateChiSq(MatrixType1 const &matrixL, //matrixL -shared
+                            MatrixType2 const &pulseMatrixView, //pulseMatrix
+                            MatrixType3 const &resultAmplitudesVector, //resultAmp -shared
+                            MatrixType4 const &inputAmplitudesView, //samples
+                            float &chi2, //shared
+                            float *accum, //shared
+                            float *results, //shared
+                            float *reg_L, //shared
+                            cg::thread_block_tile <TileSize> &tile
+        ) {
             // FIXME: this assumes pulses are on columns and samples on rows
-            constexpr auto NPULSES = MatrixType2::ColsAtCompileTime;
-            constexpr auto NSAMPLES = MatrixType2::RowsAtCompileTime;
+            constexpr auto NPULSES = MatrixType2::ColsAtCompileTime; //10
+            constexpr auto NSAMPLES = MatrixType2::RowsAtCompileTime; //10
+
+            static_assert(NPULSES == 10, "NPULSES must be 10. Not intended use");
+            static_assert(NSAMPLES == 10, "NSAMPLES must be 10. Not intended use");
+
+            auto const thrdIdx = tile.thread_rank();
+            auto const numThrd = tile.num_threads();
+
+
 
             // replace pulseMatrixView * resultAmplitudesVector - inputAmplitudesView
             // NOTE:
-            float accum[NSAMPLES];
+            //float accum[NSAMPLES];
             {
-                float results[NPULSES];
+                //float results[NPULSES];
 
                 // preload results and permute according to the pulse offsets /////////////// ??? this is not done in ECAL
                 CMS_UNROLL_LOOP
-                for (int counter = 0; counter < NPULSES; counter++) {
+                for (int counter = thrdIdx; counter < NPULSES; counter += numThrd) {
                     results[counter] = resultAmplitudesVector[counter];
                 }
 
                 // load accum
                 CMS_UNROLL_LOOP
-                for (int counter = 0; counter < NSAMPLES; counter++)
+                for (int counter = thrdIdx; counter < NPULSES; counter += numThrd) {
                     accum[counter] = -inputAmplitudesView(counter);
+                }
+
+
 
                 // iterate
-                for (int icol = 0; icol < NPULSES; icol++) {
+                for (int icol = thrdIdx; icol < NPULSES; icol += numThrd) {
                     float pm_col[NSAMPLES];
 
                     // preload a column of pulse matrix
@@ -510,6 +526,7 @@ namespace calo {
                     for (int counter = 0; counter < NSAMPLES; counter++)
                         accum[counter] += results[icol] * pm_col[counter];
                 }
+
             }
 
             // compute chi2 and check that there is no rotation
@@ -519,13 +536,12 @@ namespace calo {
             //            .solve(pulseMatrixView * resultAmplitudesVector - inputAmplitudesView)
             //    .squaredNorm();
 
-            {
-                float reg_L[NSAMPLES];
+                //float reg_L[NSAMPLES];
                 float accumSum = 0;
 
                 // preload a column and load column 0 of cholesky
                 CMS_UNROLL_LOOP
-                for (int i = 0; i < NSAMPLES; i++) {
+                for (int i = thrdIdx; i < NSAMPLES; i+=numThrd) {
                     reg_L[i] = matrixL(i, 0);
                 }
 
@@ -538,14 +554,16 @@ namespace calo {
                 for (int iL = 1; iL < NSAMPLES; iL++) {
                     // update accum
                     CMS_UNROLL_LOOP
-                    for (int counter = iL; counter < NSAMPLES; counter++)
+                    for (int counter = iL + thrdIdx; counter < NSAMPLES; counter+=numThrd){
                         accum[counter] -= x_prev * reg_L[counter];
+                        reg_L[counter] = matrixL(counter, iL);}
 
-                    // load the next column of cholesky
+
+                    /*// load the next column of cholesky
                     CMS_UNROLL_LOOP
-                    for (int counter = iL; counter < NSAMPLES; counter++)
-                        reg_L[counter] = matrixL(counter, iL);
+                    for (int counter = iL + thrdIdx; counter < NSAMPLES; counter+=numThrd)*/
 
+                    tile.sync();
                     // compute the next x for M(iL, icol)
                     x_prev = accum[iL] / reg_L[iL];
 
@@ -553,8 +571,8 @@ namespace calo {
                     accumSum += x_prev * x_prev;
                 }
 
+
                 chi2 = accumSum;
-            }
         }
 
         // TODO: add active bxs
@@ -657,12 +675,12 @@ namespace calo {
                         break;
 
 
-                        if (recompute || iter == 0)
-                            compute_decomposition_forwardsubst_with_offsets(matrixL, AtA, reg_b, Atb, npassive,
-                                                                            pulseOffsets, sumsq2, tile);
-                        else
-                            update_decomposition_forwardsubst_with_offsets(matrixL, AtA, reg_b, Atb, npassive,
-                                                                           pulseOffsets, sumsq2, tile);
+                    if (recompute || iter == 0)
+                        compute_decomposition_forwardsubst_with_offsets(matrixL, AtA, reg_b, Atb, npassive,
+                                                                        pulseOffsets, sumsq2, tile);
+                    else
+                        update_decomposition_forwardsubst_with_offsets(matrixL, AtA, reg_b, Atb, npassive,
+                                                                       pulseOffsets, sumsq2, tile);
 
                     // run backward substituion
                     s(npassive - 1) = reg_b[npassive - 1] / matrixL(npassive - 1, npassive - 1);

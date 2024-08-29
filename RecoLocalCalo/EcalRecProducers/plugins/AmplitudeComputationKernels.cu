@@ -188,10 +188,10 @@ namespace ecal {
             DataType *shrAtbStorage = reinterpret_cast<DataType *>(myPlace) + NPULSES * tileIdx;
             myPlace += NPULSES * sizeof(DataType) * numTile;
 
-            Eigen::Index* shrw_max_idxStorage = reinterpret_cast<Eigen::Index *>(myPlace) + tileIdx;
+            Eigen::Index *shrw_max_idxStorage = reinterpret_cast<Eigen::Index *>(myPlace) + tileIdx;
             myPlace += sizeof(Eigen::Index) * numTile;
 
-            Eigen::Index* shrw_max_idx_prevStorage = reinterpret_cast<Eigen::Index *>(myPlace) + tileIdx;
+            Eigen::Index *shrw_max_idx_prevStorage = reinterpret_cast<Eigen::Index *>(myPlace) + tileIdx;
             myPlace += sizeof(Eigen::Index) * numTile;
 
             float *shrw_maxStorage = reinterpret_cast<float *>(myPlace) + tileIdx;
@@ -204,7 +204,7 @@ namespace ecal {
             myPlace += sizeof(bool) * numTile;
 
             int *shrnpassiveStorage = reinterpret_cast<int *>(myPlace) + tileIdx;
-            myPlace +=  sizeof(int) * numTile;
+            myPlace += sizeof(int) * numTile;
 
             int *shrhasNegativeStorage = reinterpret_cast<int *>(myPlace) + tileIdx;
             myPlace += sizeof(int) * numTile;
@@ -218,6 +218,9 @@ namespace ecal {
             double *shrEpsStorage = reinterpret_cast<double *>(myPlace) + tileIdx;
             myPlace += sizeof(double) * numTile;
 
+            float *shrreg_L_chi2Storage = reinterpret_cast<float *>(myPlace) + tileIdx * NSAMPLES;
+            myPlace += NSAMPLES * sizeof(float) * numTile; //reg_L for chi2
+
             //---------------VARIABLES DECLARATION------------------------
             float &chi2 = *shrchi2Storage;
             float &chi2_now = *shrchi2_nowStorage;
@@ -227,11 +230,16 @@ namespace ecal {
             float *reg_b_tmp = shrreg_b_tmpStorage;
             float *reg_L = shrreg_LStorage;
 
+            //reuse them for chi2
+            float *accumChi2 = reg_b_tmp;
+            float *resultsChi2 = reg_L;
+            float *reg_L_chi2 = shrreg_L_chi2Storage;
+
             float &w_max = *shrw_maxStorage;
             float &w_max_prev = *shrw_max_prevStorage;
 
-            Eigen::Index& w_max_idx = *shrw_max_idxStorage;
-            Eigen::Index& w_max_idx_prev = *shrw_max_idx_prevStorage;
+            Eigen::Index &w_max_idx = *shrw_max_idxStorage;
+            Eigen::Index &w_max_idx_prev = *shrw_max_idx_prevStorage;
 
             bool &recompute = *shrrecomputeStorage;
             int &hasNegative = *shrhasNegativeStorage;
@@ -239,7 +247,7 @@ namespace ecal {
 
             int &npassive = *shrnpassiveStorage;
 
-            double& eps = *shrEpsStorage;
+            double &eps = *shrEpsStorage;
 
             Eigen::Map <calo::multifit::ColumnVector<NPULSES, int>> pulseOffsets(shrpulseOffsetsStorage);
             Eigen::Map <calo::multifit::ColumnVector<NPULSES, DataType>> resultAmplitudes(shrresultAmplitudesStorage);
@@ -319,7 +327,7 @@ namespace ecal {
 
                     CMS_UNROLL_LOOP
                     for (int icol = thrdIdx; icol < NPULSES; icol += numThrd) {
-                    //for (int icol = 0; icol < NPULSES; icol++) {
+                        //for (int icol = 0; icol < NPULSES; icol++) {
 
                         float reg_ai[NSAMPLES];
 
@@ -378,33 +386,38 @@ namespace ecal {
                     tile.sync();
 
 
+                    calo::multifit::fnnls_coop(AtA,
+                                               Atb,
+                                               resultAmplitudes,
+                                               npassive,
+                                               pulseOffsets,
+                                               sFnnls,
+                                               matrixLForFnnls,
+                                               eps, //eps
+                                               500, //max iterations
+                                               16,  //relaxperiod
+                                               2,   //relax factor
+                                               w_max,
+                                               w_max_prev,
+                                               w_max_idx,
+                                               w_max_idx_prev,
+                                               recompute,
+                                               sumsq2,
+                                               hasNegative,
+                                               hasNans,
+                                               reg_b_tmp,
+                                               tile);
 
-                        calo::multifit::fnnls_coop(AtA,
-                                                  Atb,
-                                                  resultAmplitudes,
-                                                  npassive,
-                                                  pulseOffsets,
-                                                  sFnnls,
-                                                  matrixLForFnnls,
-                                                  eps, //eps
-                                                  500, //max iterations
-                                                  16,  //relaxperiod
-                                                  2,   //relax factor
-                                                  w_max,
-                                                  w_max_prev,
-                                                  w_max_idx,
-                                                  w_max_idx_prev,
-                                                  recompute,
-                                                  sumsq2,
-                                                  hasNegative,
-                                                  hasNans,
-                                                  reg_b_tmp,
-                                                  tile);
 
-                    if (thrdIdx == 0) { //TODO: this is not done
-                        calo::multifit::calculateChiSq(matrixL, pulse_matrix[idx], resultAmplitudes, samples[idx],
-                                                       chi2_now);
-                    }
+                    calo::multifit::calculateChiSq(matrixL,
+                                                   pulse_matrix[idx],
+                                                   resultAmplitudes,
+                                                   samples[idx],
+                                                   chi2_now,
+                                                   accumChi2,
+                                                   resultsChi2,
+                                                   reg_L_chi2,
+                                                   tile);
 
                     tile.sync();
 
@@ -457,8 +470,8 @@ namespace ecal {
                 uint32_t const offsetForHashes = conditions.offsetForHashes;
                 uint32_t const offsetForInputs = eventInputGPU.ebDigis.size;
 
-                //      constexpr auto NSAMPLES = SampleMatrix::RowsAtCompileTime;
-                //      constexpr auto NPULSES = SampleMatrix::ColsAtCompileTime;
+                constexpr auto NSAMPLES = SampleMatrix::RowsAtCompileTime;
+                constexpr auto NPULSES = SampleMatrix::ColsAtCompileTime;
 
                 auto const nbytesShared = (threads_min *
                                            (calo::multifit::MapSymM<DataType, SampleVector::RowsAtCompileTime>::total *
@@ -477,8 +490,8 @@ namespace ecal {
                                             + SampleMatrix::RowsAtCompileTime * SampleMatrix::ColsAtCompileTime *
                                               sizeof(float) //A
                                             + sizeof(float) * SampleMatrix::RowsAtCompileTime //reg_b
-                                            + sizeof(float) * SampleMatrix::RowsAtCompileTime //reg_b_tmp
-                                            + sizeof(float) * SampleMatrix::RowsAtCompileTime //reg_b_L
+                                            + sizeof(float) * SampleMatrix::RowsAtCompileTime //reg_b_tmp //resilts chi2
+                                            + sizeof(float) * SampleMatrix::RowsAtCompileTime //reg_b_L //accum chi2
                                             + SampleVector::RowsAtCompileTime * sizeof(DataType) // Atb
                                             + sizeof(Eigen::Index) //w_max_idx
                                             + sizeof(Eigen::Index) //w_max_idx_prev
@@ -490,6 +503,11 @@ namespace ecal {
                                             + sizeof(int) //has nans        -bool doesnt work
                                             + sizeof(float) * SampleMatrix::RowsAtCompileTime //s
                                             + sizeof(double) //eps
+                                            + SampleVector::RowsAtCompileTime * sizeof(DataType) // Atb
+                                            + sizeof(float) * SampleMatrix::RowsAtCompileTime // reg_L_chi2
+
+                                                   //+ NSAMPLES*sizeof(float) //accum chi2 - will use reg_b_L
+                                                   //+ NPULSES*sizeof(float) //resilts chi2 - will use reg_b_tmp
                                            )
                                            / __SIZE_OF_TILE_MULTIFIT__);
 
