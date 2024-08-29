@@ -210,7 +210,7 @@ namespace calo {
             auto const thrdIdx = tile.thread_rank();
             auto const numThrd = tile.num_threads();
 
-            //if (thrdIdx == 0) {
+                sumsq2 = 0;
 
                 auto const real_0 = pulseOffsets(0);
                 auto const sqrtm_0_0 = std::sqrt(M(real_0, real_0));
@@ -218,34 +218,44 @@ namespace calo {
                 using T = typename MatrixType1::base_type;
                 b[0] = Atb(real_0) / sqrtm_0_0;
 
+
                 for (int i = 1; i < N; i++) { //for (int i = idx + 1; i < N; i+=tile.num_threads()) {
                     auto const i_real = pulseOffsets(i);
                     T sumsq{0};
                     T total = 0;
                     auto const atb = Atb(i_real);
                     for (int j = 0; j < i; j++) {
+
                         auto const j_real = pulseOffsets(j);
-                        sumsq2 = 0;
                         auto const m_i_j = M(std::max(i_real, j_real), std::min(i_real, j_real));
 
                         for (int k = thrdIdx; k < j; k+=numThrd){
-#ifdef __CUDA_ARCH__
-                            atomicAdd(&sumsq2, L(i, k) * L(j, k));}
-#endif
+                            atomicAdd(&sumsq2,L(i, k) * L(j, k));
+                        }
+
                         tile.sync();
+
 
                         auto const value_i_j = (m_i_j - sumsq2) / L(j, j);
                         L(i, j) = value_i_j;
 
                         sumsq += value_i_j * value_i_j;
                         total += value_i_j * b[j];
+
+                        tile.sync();
+
+                        sumsq2 = 0;
                     }
+
+                    tile.sync();
+
 
                     auto const l_i_i = std::sqrt(M(i_real, i_real) - sumsq);
                     L(i, i) = l_i_i;
                     b[i] = (atb - total) / l_i_i;
                 }
-            //}
+
+
         }
 
         template<typename MatrixType1, typename MatrixType2, typename VectorType, unsigned int TileSize>
@@ -261,10 +271,10 @@ namespace calo {
                 float &sumsq2,
                 cg::thread_block_tile <TileSize> &tile) {
 
+            sumsq2 = 0;
+
             auto const thrdIdx = tile.thread_rank();
             auto const numThrd = tile.num_threads();
-
-            //if (thrdIdx == 0) {
 
                 using T = typename MatrixType1::base_type;
                 auto const i = N - 1;
@@ -273,12 +283,11 @@ namespace calo {
                 T total = 0;
                 for (int j = 0; j < i; j++) {
                     auto const j_real = pulseOffsets(j);
-                    sumsq2 = 0;
                     auto const m_i_j = M(std::max(i_real, j_real), std::min(i_real, j_real));
                     for (int k = thrdIdx; k < j; k+=numThrd){
-#ifdef __CUDA_ARCH__
-                        atomicAdd(&sumsq2, L(i, k) * L(j, k));}
-#endif
+                        atomicAdd(&sumsq2,L(i, k) * L(j, k));
+                    }
+
                     tile.sync();
 
                     auto const value_i_j = (m_i_j - sumsq2) / L(j, j);
@@ -286,12 +295,18 @@ namespace calo {
                     sumsq += value_i_j * value_i_j;
 
                     total += value_i_j * b[j];
+
+                    tile.sync();
+
+                    sumsq2 = 0;
+
                 }
+
+                tile.sync();
 
                 auto const l_i_i = std::sqrt(M(i_real, i_real) - sumsq);
                 L(i, i) = l_i_i;
                 b[i] = (Atb(i_real) - total) / l_i_i;
-            //}
 
             tile.sync();
         }
@@ -641,19 +656,13 @@ namespace calo {
                     if (npassive == 0)
                         break;
 
-                   // if (thrdIdx == 0) {
-                        //s.head(npassive)
-                        //auto const& matrixL =
-                        //    AtA.topLeftCorner(npassive, npassive)
-                        //        .llt().matrixL();
-                        //.solve(Atb.head(npassive));
+
                         if (recompute || iter == 0)
                             compute_decomposition_forwardsubst_with_offsets(matrixL, AtA, reg_b, Atb, npassive,
                                                                             pulseOffsets, sumsq2, tile);
                         else
                             update_decomposition_forwardsubst_with_offsets(matrixL, AtA, reg_b, Atb, npassive,
                                                                            pulseOffsets, sumsq2, tile);
-                    //}
 
                     // run backward substituion
                     s(npassive - 1) = reg_b[npassive - 1] / matrixL(npassive - 1, npassive - 1);
