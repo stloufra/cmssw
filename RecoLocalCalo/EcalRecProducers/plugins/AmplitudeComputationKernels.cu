@@ -419,7 +419,6 @@ namespace ecal {
                                                    reg_L_chi2,
                                                    tile);
 
-                    tile.sync();
 
                     if (std::abs(chi2_now - chi2) < 1e-3) {
                         chi2 = chi2_now;

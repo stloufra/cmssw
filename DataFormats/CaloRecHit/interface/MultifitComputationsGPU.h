@@ -465,7 +465,6 @@ namespace calo {
 
         template<typename MatrixType1, typename MatrixType2, typename MatrixType3, typename MatrixType4, unsigned int TileSize>
         EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC
-
         void calculateChiSq(MatrixType1 const &matrixL, //matrixL -shared
                             MatrixType2 const &pulseMatrixView, //pulseMatrix
                             MatrixType3 const &resultAmplitudesVector, //resultAmp -shared
@@ -552,16 +551,13 @@ namespace calo {
                 // iterate
                 CMS_UNROLL_LOOP
                 for (int iL = 1; iL < NSAMPLES; iL++) {
-                    // update accum
+
+                    // update accum and load new column
                     CMS_UNROLL_LOOP
                     for (int counter = iL + thrdIdx; counter < NSAMPLES; counter+=numThrd){
                         accum[counter] -= x_prev * reg_L[counter];
                         reg_L[counter] = matrixL(counter, iL);}
 
-
-                    /*// load the next column of cholesky
-                    CMS_UNROLL_LOOP
-                    for (int counter = iL + thrdIdx; counter < NSAMPLES; counter+=numThrd)*/
 
                     tile.sync();
                     // compute the next x for M(iL, icol)
@@ -573,6 +569,29 @@ namespace calo {
 
 
                 chi2 = accumSum;
+
+            tile.sync();
+
+        }
+
+
+
+
+       __device__ __forceinline__ float atomicMaxFloat (float * addr, float value) {
+            float old;
+            old = (value >= 0) ? __int_as_float(atomicMax((int *)addr, __float_as_int(value))) :
+                  __uint_as_float(atomicMin((unsigned int *)addr, __float_as_uint(value)));
+
+            return old;
+        }
+
+
+        __device__ __forceinline__ float atomicMinFloat (float * addr, float value) {
+            float old;
+            old = (value >= 0) ? __int_as_float(atomicMin((int *)addr, __float_as_int(value))) :
+                  __uint_as_float(atomicMax((unsigned int *)addr, __float_as_uint(value)));
+
+            return old;
         }
 
         // TODO: add active bxs
@@ -623,9 +642,9 @@ namespace calo {
                     w_max_idx = 0;
                     w_max = -std::numeric_limits<float>::max();
 
-                    if (thrdIdx == 0) {
-                        for (int icol = npassive; icol <
-                                                  NPULSES; icol++) { // for (int icol = idx + npassive; icol < NPULSES; icol+= tile.num_threads()) {
+                    //if (thrdIdx == 0) {  ///TODO!!
+                        //for (int icol = npassive; icol <NPULSES; icol++) {
+                            for (int icol = thrdIdx + npassive; icol < NPULSES; icol+= numThrd) {
                             auto const icol_real = pulseOffsets(icol);
                             auto const atb = Atb(icol_real);
                             float sum = 0;
@@ -635,12 +654,17 @@ namespace calo {
                                                            : AtA(icol_real, counter) * solution(counter);
 
                             auto const w = atb - sum;
-                            if (w > w_max) {
-                                w_max = w;
+
+                            auto value = atomicMaxFloat(&w_max, w);
+                            value = atomicMaxFloat(&w_max, w);
+
+                            if(value == w){
                                 w_max_idx = icol - npassive;
                             }
+
+
                         }
-                    }
+                    //}
 
                     tile.sync();
                     // check for convergence
@@ -737,6 +761,7 @@ namespace calo {
                         break;
                     }
 
+                    tile.sync();
 
                     // there were negative values -> have to recompute the whole decomp
                     recompute = true;
@@ -745,16 +770,27 @@ namespace calo {
 
                     Eigen::Index alpha_idx = 0, alpha_idx_real = 0;
 
-                    if (thrdIdx == 0) {
+                    if (thrdIdx == 0) { ///TODO!!
                         for (int i = 0; i < npassive; i++) {
                             if (s[i] <= 0.) {
                                 auto const i_real = pulseOffsets(i);
                                 auto const ratio = solution[i_real] / (solution[i_real] - s[i]);
-                                if (ratio < sumsq2) {
+
+
+                                auto value = atomicMinFloat(&sumsq2, ratio);
+                                value = atomicMinFloat(&sumsq2, ratio);
+
+                                if(value == ratio){
+                                    alpha_idx = i;
+                                    alpha_idx_real = i_real; //atomicMin
+                                }
+
+
+                                /*if (ratio < sumsq2) {
                                     sumsq2 = ratio;
                                     alpha_idx = i;
                                     alpha_idx_real = i_real; //atomicMax
-                                }
+                                }*/
                             }
                         }
                     }
